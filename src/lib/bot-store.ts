@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import {
   emptyFeeds,
+  feedHasRows,
   type LiveFeeds,
 } from "@/lib/dashboard-data";
 import { readFeedsFile, writeFeedsFile } from "@/lib/feeds-io";
@@ -162,10 +163,13 @@ export function ensureFeedLoop() {
   void ensureFeedsLoaded();
   void ensureJobsLoaded();
   void ensureArtifactsLoaded();
-  if (state.feedTimer) return;
-  state.feedTimer = setInterval(() => {
-    void reloadFeedsFromDisk();
-  }, 5000);
+  // The old 5s timer re-read data/feeds.json and pushed it to the dashboard.
+  // On Vercel that file stays the empty copy from git (the disk is read-only),
+  // so the push wiped Google rows and the cards fell through to the empty state.
+  if (state.feedTimer) {
+    clearInterval(state.feedTimer);
+    state.feedTimer = null;
+  }
 }
 
 export function subscribe(
@@ -204,7 +208,11 @@ export function getFeeds(): LiveFeeds {
 
 export async function reloadFeedsFromDisk(): Promise<LiveFeeds> {
   const state = getState();
-  state.feeds = await readFeedsFile();
+  const fromDisk = await readFeedsFile();
+  if (state.feedsLoaded && !feedHasRows(fromDisk) && feedHasRows(state.feeds)) {
+    return state.feeds;
+  }
+  state.feeds = fromDisk;
   state.feedsLoaded = true;
   emit("feeds", state.feeds);
   return state.feeds;

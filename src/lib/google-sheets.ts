@@ -116,6 +116,10 @@ export type SheetTab = {
   sheetId: number;
   rows: string[][];
   error?: string;
+  /** A1 range Google says it returned, such as 'Form Responses 1'!A1:F5. */
+  reportedRange?: string;
+  /** False when the JSON had no `values` array. */
+  valuesKeyPresent?: boolean;
 };
 
 function quotedRange(title: string): string {
@@ -183,12 +187,20 @@ export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]
       });
       continue;
     }
-    const values = (await valuesRes.json()) as { values?: unknown[][] };
+    const values = (await valuesRes.json()) as {
+      range?: string;
+      values?: unknown;
+    };
+    const rawRows = Array.isArray(values.values) ? values.values : [];
     loaded.push({
       title,
       sheetId,
-      rows: (values.values ?? []).map((row) =>
-        row.map((cell) => (cell == null ? "" : String(cell))),
+      reportedRange: typeof values.range === "string" ? values.range : undefined,
+      valuesKeyPresent: Array.isArray(values.values),
+      rows: rawRows.map((row) =>
+        Array.isArray(row)
+          ? row.map((cell) => (cell == null ? "" : String(cell)))
+          : [],
       ),
     });
   }
@@ -215,7 +227,7 @@ function normalizeHeader(value: string): string {
   return value
     .trim()
     .toLowerCase()
-    .replace(/[:?]+$/g, "")
+    .replace(/[:?：？]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
 }
@@ -251,32 +263,94 @@ export function formResponsesTab(tabs: SheetTab[]): SheetTab | undefined {
   );
 }
 
+export type OpenHouseColumnMap = {
+  looksLikeHeader: boolean;
+  headerCellCount: number;
+  timestamp: number;
+  name: number;
+  date: number;
+  saturday: number;
+  sunday: number;
+  notes: number;
+};
+
+function locateOpenHouseColumns(table: string[][]): OpenHouseColumnMap & {
+  body: string[][];
+} {
+  const header = table[0] ?? [];
+  const headers = header.map(normalizeHeader);
+  const looksLikeHeader = headers.some((cell) =>
+    /name|date|saturday|sunday|notes|timestamp|avail/.test(cell),
+  );
+  if (!table.length || !looksLikeHeader) {
+    return {
+      looksLikeHeader,
+      headerCellCount: header.length,
+      body: table,
+      timestamp: -1,
+      name: table.length ? 0 : -1,
+      date: table.length ? 1 : -1,
+      saturday: table.length ? 2 : -1,
+      sunday: table.length ? 3 : -1,
+      notes: table.length ? 4 : -1,
+    };
+  }
+  return {
+    looksLikeHeader,
+    headerCellCount: header.length,
+    body: table.slice(1),
+    timestamp: columnIndex(headers, ["timestamp"]),
+    name: columnIndex(headers, ["your name", "name", "agent"]),
+    date: columnIndex(headers, ["date", "weekend date"]),
+    saturday: columnIndex(headers, ["available saturday", "saturday", "sat"]),
+    sunday: columnIndex(headers, ["available sunday", "sunday", "sun"]),
+    notes: columnIndex(headers, ["notes", "note"]),
+  };
+}
+
+export type OpenHouseReadStats = OpenHouseColumnMap & {
+  valuesRowCount: number;
+  dataRowCount: number;
+  nonEmptyDataRowCount: number;
+  mappedRowCount: number;
+};
+
+/** Counts and column indexes only. No cell text. */
+export function openHouseReadStats(table: string[][]): OpenHouseReadStats {
+  const located = locateOpenHouseColumns(table);
+  const nonEmptyDataRowCount = located.body.filter((row) =>
+    row.some((value) => value.trim()),
+  ).length;
+  return {
+    looksLikeHeader: located.looksLikeHeader,
+    headerCellCount: located.headerCellCount,
+    timestamp: located.timestamp,
+    name: located.name,
+    date: located.date,
+    saturday: located.saturday,
+    sunday: located.sunday,
+    notes: located.notes,
+    valuesRowCount: table.length,
+    dataRowCount: located.body.length,
+    nonEmptyDataRowCount,
+    mappedRowCount: openHouseRowsFromTable(table).length,
+  };
+}
+
 /**
  * Map a Form Responses sheet.
  * Expected headers: Timestamp, Your Name, Date:, Available Saturday?, Available Sunday?, Notes:
  */
 export function openHouseRowsFromTable(table: string[][]): OpenHouseRow[] {
   if (!table.length) return [];
-  const headers = table[0].map(normalizeHeader);
-  const looksLikeHeader = headers.some((cell) =>
-    /name|date|saturday|sunday|notes|timestamp|avail/.test(cell),
-  );
-  const body = looksLikeHeader ? table.slice(1) : table;
-  const headerRow = looksLikeHeader ? headers : [];
-  const timestampCol = headerRow.length ? columnIndex(headerRow, ["timestamp"]) : -1;
-  const nameCol = headerRow.length
-    ? columnIndex(headerRow, ["your name", "name", "agent"])
-    : 0;
-  const dateCol = headerRow.length
-    ? columnIndex(headerRow, ["date", "weekend date"])
-    : 1;
-  const saturdayCol = headerRow.length
-    ? columnIndex(headerRow, ["available saturday", "saturday", "sat"])
-    : 2;
-  const sundayCol = headerRow.length
-    ? columnIndex(headerRow, ["available sunday", "sunday", "sun"])
-    : 3;
-  const notesCol = headerRow.length ? columnIndex(headerRow, ["notes", "note"]) : 4;
+  const located = locateOpenHouseColumns(table);
+  const { body } = located;
+  const timestampCol = located.timestamp;
+  const nameCol = located.name;
+  const dateCol = located.date;
+  const saturdayCol = located.saturday;
+  const sundayCol = located.sunday;
+  const notesCol = located.notes;
 
   const rows = body
     .map((row) => {

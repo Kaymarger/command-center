@@ -122,6 +122,27 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
   };
 }
 
+export function feedHasRows(feeds: LiveFeeds): boolean {
+  return (
+    feeds.cincAgents.length > 0 ||
+    feeds.openHouse.rows.length > 0 ||
+    feeds.referrals.active.length > 0 ||
+    feeds.referrals.history.length > 0 ||
+    feeds.anniversaries.length > 0 ||
+    feeds.birthdays.length > 0 ||
+    feeds.outstandingEmails.length > 0
+  );
+}
+
+/**
+ * A blank snapshot (the empty feeds file on disk) must not replace rows
+ * already loaded from Google.
+ */
+export function preferLiveFeeds(current: LiveFeeds, incoming: LiveFeeds): LiveFeeds {
+  if (!feedHasRows(incoming) && feedHasRows(current)) return current;
+  return incoming;
+}
+
 export function summarizeOpenHouses(rows: OpenHouseRow[]): string {
   if (!rows.length) return "";
   const saturday = rows.filter((row) => /^(yes|y|true|available)$/i.test(row.saturday ?? "")).length;

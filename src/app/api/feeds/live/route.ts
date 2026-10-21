@@ -3,6 +3,7 @@ import { loadDashboardFeeds } from "@/lib/sheet-sync";
 import { requireUserSession } from "@/lib/ops-guard";
 
 export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
 export const runtime = "nodejs";
 
 export async function GET() {

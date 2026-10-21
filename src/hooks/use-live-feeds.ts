@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   emptyFeeds,
+  preferLiveFeeds,
   type LiveFeeds,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
@@ -75,7 +76,9 @@ export function useLiveFeeds() {
       source.addEventListener("feeds", (event) => {
         const data = JSON.parse((event as MessageEvent).data) as LiveFeeds;
         if (!cancelled) {
-          setFeeds({ ...emptyFeeds(), ...data });
+          setFeeds((current) =>
+            preferLiveFeeds(current, { ...emptyFeeds(), ...data }),
+          );
           setLive(true);
           setError(null);
         }
