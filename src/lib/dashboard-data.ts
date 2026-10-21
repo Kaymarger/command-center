@@ -67,8 +67,20 @@ export type ReferralItem = {
 
 export type OpenHouseRow = {
   agent: string;
+  /** Weekend date from the form, or the time window from the ops sheet. */
   window: string;
   coverage: string;
+  saturday?: string;
+  sunday?: string;
+  notes?: string;
+};
+
+export type SheetCardErrors = {
+  cinc: string | null;
+  referrals: string | null;
+  anniversaries: string | null;
+  birthdays: string | null;
+  emails: string | null;
 };
 
 export type LiveFeeds = {
@@ -112,12 +124,10 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
 
 export function summarizeOpenHouses(rows: OpenHouseRow[]): string {
   if (!rows.length) return "";
-  const available = rows.filter((r) =>
-    /available/i.test(r.coverage)
-  ).length;
-  const limited = rows.filter((r) => /limited/i.test(r.coverage)).length;
-  const unavailable = rows.filter((r) =>
-    /unavail/i.test(r.coverage)
-  ).length;
-  return `${rows.length} agents on the form · ${available} available · ${limited} limited · ${unavailable} unavailable.`;
+  const saturday = rows.filter((row) => /^(yes|y|true|available)$/i.test(row.saturday ?? "")).length;
+  const sunday = rows.filter((row) => /^(yes|y|true|available)$/i.test(row.sunday ?? "")).length;
+  if (saturday || sunday) {
+    return `${rows.length} responses · ${saturday} available Saturday · ${sunday} available Sunday.`;
+  }
+  return `${rows.length} responses.`;
 }

@@ -10,9 +10,13 @@ export async function POST() {
   if (denied) return denied;
 
   try {
-    const feeds = await syncFeedsFromGoogleSheet();
-    await setFeeds(feeds);
-    return NextResponse.json({ ok: true, feeds });
+    const synced = await syncFeedsFromGoogleSheet();
+    await setFeeds(synced.feeds);
+    return NextResponse.json({
+      ok: true,
+      feeds: synced.feeds,
+      cardErrors: synced.cardErrors,
+    });
   } catch (error) {
     return NextResponse.json(
       {

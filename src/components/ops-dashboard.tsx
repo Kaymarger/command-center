@@ -55,6 +55,10 @@ function EmptyTile({ message }: { message: string }) {
   );
 }
 
+function SheetProblem({ message }: { message: string }) {
+  return <p className="text-xs leading-relaxed text-amber-200">{message}</p>;
+}
+
 function LiveDot({ live }: { live: boolean }) {
   return (
     <span className="inline-flex items-center gap-1.5 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[#7395B8]">
@@ -123,8 +127,17 @@ function Tile({
 }
 
 export function OpsDashboard() {
-  const { feeds, drafts, jobs, artifacts, live, error, sheetError, openHouseError } =
-    useLiveFeeds();
+  const {
+    feeds,
+    drafts,
+    jobs,
+    artifacts,
+    live,
+    error,
+    sheetError,
+    openHouseError,
+    cardErrors,
+  } = useLiveFeeds();
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [expandedDraft, setExpandedDraft] = useState<string | null>(null);
   const [cincPeriod, setCincPeriod] = useState<"wtd" | "mtd" | "ytd">("wtd");
@@ -355,7 +368,9 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Outstanding Emails">
-          {emails.length === 0 ? (
+          {cardErrors?.emails ? (
+            <SheetProblem message={cardErrors.emails} />
+          ) : emails.length === 0 ? (
             <EmptyTile message="No outstanding emails in the live sheet." />
           ) : (
             <ul className="grid gap-2">
@@ -393,12 +408,9 @@ export function OpsDashboard() {
 
         <Tile title="Open House Availability" botId="google-forms" live={live}>
           {openHouseError ? (
-            <p className="text-xs leading-relaxed text-amber-200">{openHouseError}</p>
-          ) : null}
-          {(feeds.openHouse?.rows ?? []).length === 0 ? (
-            openHouseError ? null : (
-              <EmptyTile message="No open-house responses yet." />
-            )
+            <SheetProblem message={openHouseError} />
+          ) : (feeds.openHouse?.rows ?? []).length === 0 ? (
+            <EmptyTile message="No open-house responses yet." />
           ) : (
             <>
               {feeds.openHouse?.summary ? (
@@ -406,21 +418,24 @@ export function OpsDashboard() {
                   {feeds.openHouse.summary}
                 </p>
               ) : null}
-              <ul className="grid gap-1.5 text-xs">
+              <ul className="grid gap-2 text-xs">
                 {(feeds.openHouse?.rows ?? []).map((row, index) => (
                   <li
-                    key={`${row.agent}-${row.coverage}-${row.window}-${index}`}
-                    className="flex items-start justify-between gap-2 border-b border-white/5 py-1.5 last:border-0"
+                    key={`${row.agent}-${row.window}-${index}`}
+                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2"
                   >
-                    <span>
-                      <span className="font-medium text-foreground">
-                        {row.agent}
-                      </span>
-                      <span className="mt-0.5 block text-muted-foreground">
-                        {row.window}
-                      </span>
-                    </span>
-                    <span className="shrink-0 text-[#7395B8]">{row.coverage}</span>
+                    <p className="font-medium text-foreground">
+                      {row.agent || "No name"}
+                    </p>
+                    <p className="mt-0.5 text-muted-foreground">
+                      Weekend date · {row.window || "—"}
+                    </p>
+                    <p className="mt-1 text-[#7395B8]">
+                      Sat {row.saturday || "—"} · Sun {row.sunday || "—"}
+                    </p>
+                    {row.notes ? (
+                      <p className="mt-1 text-muted-foreground">{row.notes}</p>
+                    ) : null}
                   </li>
                 ))}
               </ul>
@@ -429,9 +444,11 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Referral Exchange" botId="work-routine" live={live}>
-          {(feeds.referrals?.active ?? []).length === 0 &&
+          {cardErrors?.referrals ? (
+            <SheetProblem message={cardErrors.referrals} />
+          ) : (feeds.referrals?.active ?? []).length === 0 &&
           (feeds.referrals?.history ?? []).length === 0 ? (
-            <EmptyTile message="Waiting for Work Routine bot / Referrals sheet rows." />
+            <EmptyTile message="No referral rows in the sheet yet." />
           ) : (
             <>
               <p className="mb-2 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-[#7395B8]">
@@ -468,8 +485,10 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="CINC Call History" botId="cinc" live={live}>
-          {(feeds.cincAgents ?? []).length === 0 ? (
-            <EmptyTile message="Waiting for CINC bot / CINC sheet rows." />
+          {cardErrors?.cinc ? (
+            <SheetProblem message={cardErrors.cinc} />
+          ) : (feeds.cincAgents ?? []).length === 0 ? (
+            <EmptyTile message="No CINC rows in the sheet yet." />
           ) : (
             <>
               <div className="mb-2 flex gap-1">
@@ -540,8 +559,10 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Client Anniversaries" botId="work-routine" live={live}>
-          {(feeds.anniversaries ?? []).length === 0 ? (
-            <EmptyTile message="Waiting for Work Routine bot / Anniversaries sheet." />
+          {cardErrors?.anniversaries ? (
+            <SheetProblem message={cardErrors.anniversaries} />
+          ) : (feeds.anniversaries ?? []).length === 0 ? (
+            <EmptyTile message="No anniversaries in the sheet yet." />
           ) : (
             <ul className="grid gap-2">
               {(feeds.anniversaries ?? []).map((item) => (
@@ -565,8 +586,10 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Client Birthdays" botId="work-routine" live={live}>
-          {(feeds.birthdays ?? []).length === 0 ? (
-            <EmptyTile message="Waiting for Work Routine bot / Birthdays sheet." />
+          {cardErrors?.birthdays ? (
+            <SheetProblem message={cardErrors.birthdays} />
+          ) : (feeds.birthdays ?? []).length === 0 ? (
+            <EmptyTile message="No birthdays in the sheet yet." />
           ) : (
             <ul className="grid gap-2">
               {(feeds.birthdays ?? []).map((item) => (

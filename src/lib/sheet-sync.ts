@@ -3,10 +3,12 @@ import {
   sheetTabs,
   summarizeOpenHouses,
   type LiveFeeds,
+  type SheetCardErrors,
 } from "@/lib/dashboard-data";
 import { feedsFromSheetTables } from "@/lib/feeds-io";
 import { reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
+  formResponsesTab,
   loadServiceAccount,
   openHouseRowsFromTable,
   openHouseSheetId,
@@ -37,7 +39,18 @@ type DashboardPayload = {
   feeds: LiveFeeds;
   sheetError: string | null;
   openHouseError: string | null;
+  cardErrors: SheetCardErrors;
 };
+
+function blankCardErrors(): SheetCardErrors {
+  return {
+    cinc: null,
+    referrals: null,
+    anniversaries: null,
+    birthdays: null,
+    emails: null,
+  };
+}
 
 type Cache = DashboardPayload & { at: number };
 
@@ -49,15 +62,20 @@ function pickTab(
   tabs: SheetTab[],
   gid: number,
   names: string[],
-): { rows: string[][]; found: boolean } {
+): { rows: string[][]; found: boolean; error: string | null } {
   const byGid = tabs.find((tab) => tab.sheetId === gid);
-  if (byGid) return { rows: byGid.rows, found: true };
   const byName = tabs.find((tab) => {
     const title = tab.title.toLowerCase();
     return names.some((name) => title.includes(name));
   });
-  if (byName) return { rows: byName.rows, found: true };
-  return { rows: [], found: false };
+  const match = byGid ?? byName;
+  if (!match) return { rows: [], found: false, error: null };
+  return { rows: match.rows, found: true, error: match.error ?? null };
+}
+
+function missingTabMessage(label: string, titles: string[]): string {
+  const found = titles.length ? titles.join(", ") : "none";
+  return `The ${label} tab was not found in the dashboard sheet. Tabs Google returned: ${found}.`;
 }
 
 async function opsTables(): Promise<{
@@ -67,17 +85,55 @@ async function opsTables(): Promise<{
   referrals: string[][];
   openHouses: string[][];
   outstandingEmails: string[][];
-  foundTitles: string[];
+  cardErrors: SheetCardErrors;
 }> {
   const id = opsSheetId();
   if (!id) {
-    throw new Error(
-      "AREG_OPS_SHEET_ID is not set on the host, so the dashboard has nothing to read.",
-    );
+    const message =
+      "AREG_OPS_SHEET_ID is not set on the host, so this card has nothing to read.";
+    return {
+      cinc: [],
+      anniversaries: [],
+      birthdays: [],
+      referrals: [],
+      openHouses: [],
+      outstandingEmails: [],
+      cardErrors: {
+        cinc: message,
+        referrals: message,
+        anniversaries: message,
+        birthdays: message,
+        emails: message,
+      },
+    };
   }
 
   if (loadServiceAccount()) {
-    const tabs = await readSpreadsheet(id);
+    let tabs: SheetTab[] = [];
+    try {
+      tabs = await readSpreadsheet(id);
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "Google could not open the dashboard sheet.";
+      return {
+        cinc: [],
+        anniversaries: [],
+        birthdays: [],
+        referrals: [],
+        openHouses: [],
+        outstandingEmails: [],
+        cardErrors: {
+          cinc: message,
+          referrals: message,
+          anniversaries: message,
+          birthdays: message,
+          emails: message,
+        },
+      };
+    }
+    const titles = tabs.map((tab) => tab.title);
     const cinc = pickTab(tabs, sheetTabs.CINC, ["cinc"]);
     const anniversaries = pickTab(tabs, sheetTabs.Anniversaries, ["anniversar"]);
     const birthdays = pickTab(tabs, sheetTabs.Birthdays, ["birthday"]);
@@ -87,20 +143,23 @@ async function opsTables(): Promise<{
       "outstanding",
       "email",
     ]);
-    const foundAny = [
-      cinc,
-      anniversaries,
-      birthdays,
-      referrals,
-      openHouses,
-      outstandingEmails,
-    ].some((tab) => tab.found);
-    if (!foundAny) {
-      const titles = tabs.map((tab) => tab.title).join(", ") || "none";
-      throw new Error(
-        `The dashboard sheet opened, but no tab matched the cards. Tabs in the file: ${titles}. Name them CINC, Anniversaries, Birthdays, Referrals, Open Houses, and Outstanding Emails.`,
-      );
-    }
+    const cardErrors: SheetCardErrors = {
+      cinc: cinc.error ?? (cinc.found ? null : missingTabMessage("CINC", titles)),
+      anniversaries:
+        anniversaries.error ??
+        (anniversaries.found ? null : missingTabMessage("Anniversaries", titles)),
+      birthdays:
+        birthdays.error ??
+        (birthdays.found ? null : missingTabMessage("Birthdays", titles)),
+      referrals:
+        referrals.error ??
+        (referrals.found ? null : missingTabMessage("Referrals", titles)),
+      emails:
+        outstandingEmails.error ??
+        (outstandingEmails.found
+          ? null
+          : missingTabMessage("Outstanding Emails", titles)),
+    };
     return {
       cinc: cinc.rows,
       anniversaries: anniversaries.rows,
@@ -108,7 +167,7 @@ async function opsTables(): Promise<{
       referrals: referrals.rows,
       openHouses: openHouses.rows,
       outstandingEmails: outstandingEmails.rows,
-      foundTitles: tabs.map((tab) => tab.title),
+      cardErrors,
     };
   }
 
@@ -123,11 +182,14 @@ async function opsTables(): Promise<{
     referrals,
     openHouses,
     outstandingEmails,
-    foundTitles: [],
+    cardErrors: blankCardErrors(),
   };
 }
 
-export async function syncFeedsFromGoogleSheet(): Promise<LiveFeeds> {
+export async function syncFeedsFromGoogleSheet(): Promise<{
+  feeds: LiveFeeds;
+  cardErrors: SheetCardErrors;
+}> {
   const tables = await opsTables();
   const feeds = feedsFromSheetTables({
     cinc: tables.cinc,
@@ -137,7 +199,7 @@ export async function syncFeedsFromGoogleSheet(): Promise<LiveFeeds> {
     openHouses: tables.openHouses,
     outstandingEmails: tables.outstandingEmails,
   });
-  return feeds;
+  return { feeds, cardErrors: tables.cardErrors };
 }
 
 async function readOpenHouseForm(): Promise<
@@ -151,9 +213,16 @@ async function readOpenHouseForm(): Promise<
       return { rows };
     }
     const tabs = await readSpreadsheet(id);
-    const tab =
-      tabs.find((item) => /response|form|avail/i.test(item.title)) ?? tabs[0];
-    if (!tab) return { rows: [] };
+    const tab = formResponsesTab(tabs);
+    if (!tab) {
+      return { error: "Google opened the open-house sheet, but it has no tabs." };
+    }
+    if (tab.error) return { error: tab.error };
+    if (tab.rows.length === 0) {
+      return {
+        error: `Google opened the “${tab.title}” tab but sent back no cells.`,
+      };
+    }
     return { rows: openHouseRowsFromTable(tab.rows) };
   } catch (error) {
     return {
@@ -173,14 +242,24 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
 
   let feeds = emptyFeeds();
   let sheetError: string | null = null;
+  let cardErrors = blankCardErrors();
   try {
-    feeds = await syncFeedsFromGoogleSheet();
+    const synced = await syncFeedsFromGoogleSheet();
+    feeds = synced.feeds;
+    cardErrors = synced.cardErrors;
     await setFeeds(feeds);
   } catch (error) {
     sheetError =
       error instanceof Error
         ? error.message
         : "The dashboard sheet could not be read.";
+    cardErrors = {
+      cinc: sheetError,
+      referrals: sheetError,
+      anniversaries: sheetError,
+      birthdays: sheetError,
+      emails: sheetError,
+    };
     try {
       feeds = await reloadFeedsFromDisk();
     } catch {
@@ -207,7 +286,12 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
     };
   }
 
-  const payload: DashboardPayload = { feeds, sheetError, openHouseError };
+  const payload: DashboardPayload = {
+    feeds,
+    sheetError,
+    openHouseError,
+    cardErrors,
+  };
   cacheGlobal.__areg_sheet_cache__ = { ...payload, at: Date.now() };
   return payload;
 }

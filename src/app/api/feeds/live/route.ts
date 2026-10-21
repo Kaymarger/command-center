@@ -16,6 +16,7 @@ export async function GET() {
       ...payload.feeds,
       sheetError: payload.sheetError,
       openHouseError: payload.openHouseError,
+      cardErrors: payload.cardErrors,
     },
     { headers: { "Cache-Control": "no-store" } },
   );
@@ -31,5 +32,6 @@ export async function POST() {
     ...payload.feeds,
     sheetError: payload.sheetError,
     openHouseError: payload.openHouseError,
+    cardErrors: payload.cardErrors,
   });
 }

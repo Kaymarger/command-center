@@ -115,7 +115,26 @@ export type SheetTab = {
   title: string;
   sheetId: number;
   rows: string[][];
+  error?: string;
 };
+
+function quotedRange(title: string): string {
+  const escaped = title.replace(/'/g, "''");
+  return `'${escaped}'!A:Z`;
+}
+
+async function googleFailure(res: Response, label: string): Promise<string> {
+  let detail = "";
+  try {
+    const body = (await res.json()) as { error?: { message?: string } };
+    detail = body.error?.message?.trim() ?? "";
+  } catch {
+    detail = "";
+  }
+  return detail
+    ? `Google could not read ${label} (HTTP ${res.status}): ${detail}`
+    : `Google could not read ${label} (HTTP ${res.status}).`;
+}
 
 async function googleGet(url: string, token: string): Promise<Response> {
   return fetch(url, {
@@ -130,20 +149,17 @@ export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]
     `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(title,sheetId)`,
     token,
   );
-  if (metaRes.status === 404) {
-    throw new Error(
-      "Google could not find that spreadsheet. Check the spreadsheet id in the env var.",
-    );
-  }
-  if (metaRes.status === 403) {
-    throw new Error(
-      `Google refused this spreadsheet. In Google Sheets, click Share and add ${email} as a Viewer.`,
-    );
-  }
   if (!metaRes.ok) {
-    throw new Error(
-      `Google could not open the spreadsheet (HTTP ${metaRes.status}).`,
-    );
+    const detail = await googleFailure(metaRes, "the spreadsheet");
+    if (metaRes.status === 403) {
+      throw new Error(
+        `${detail} Share the sheet with ${email} as a Viewer or Editor.`,
+      );
+    }
+    if (metaRes.status === 404) {
+      throw new Error(`${detail} Check the spreadsheet id on the host.`);
+    }
+    throw new Error(detail);
   }
   const meta = (await metaRes.json()) as {
     sheets?: { properties?: { title?: string; sheetId?: number } }[];
@@ -153,20 +169,27 @@ export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]
   for (const tab of tabs) {
     const title = tab.properties?.title?.trim() || "Sheet";
     const sheetId = tab.properties?.sheetId ?? 0;
+    const range = quotedRange(title);
     const valuesRes = await googleGet(
-      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(title)}`,
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`,
       token,
     );
     if (!valuesRes.ok) {
-      throw new Error(
-        `Google could not read the “${title}” tab (HTTP ${valuesRes.status}).`,
-      );
+      loaded.push({
+        title,
+        sheetId,
+        rows: [],
+        error: await googleFailure(valuesRes, `the “${title}” tab`),
+      });
+      continue;
     }
-    const values = (await valuesRes.json()) as { values?: string[][] };
+    const values = (await valuesRes.json()) as { values?: unknown[][] };
     loaded.push({
       title,
       sheetId,
-      rows: (values.values ?? []).map((row) => row.map((cell) => String(cell ?? ""))),
+      rows: (values.values ?? []).map((row) =>
+        row.map((cell) => (cell == null ? "" : String(cell))),
+      ),
     });
   }
   return loaded;
@@ -188,48 +211,100 @@ export async function readPublicCsv(spreadsheetId: string, gid: number): Promise
   return parseCsv(text);
 }
 
-function headerIndex(headers: string[], needles: string[], skip: number[] = []): number {
-  return headers.findIndex((header, index) => {
-    if (skip.includes(index)) return false;
-    if (header === "timestamp" || header.startsWith("timestamp")) return false;
-    return needles.some((needle) => header.includes(needle));
-  });
+function normalizeHeader(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[:?]+$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-/** Turn a Google Form responses tab into open-house availability rows. */
+function columnIndex(headers: string[], names: string[]): number {
+  const exact = headers.findIndex((header) => names.includes(header));
+  if (exact >= 0) return exact;
+  return headers.findIndex((header) =>
+    names.some((name) => header === name || header.startsWith(`${name} `)),
+  );
+}
+
+function cell(row: string[], index: number): string {
+  if (index < 0) return "";
+  return (row[index] ?? "").trim();
+}
+
+function timeValue(value: string): number {
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/** Prefer the Google Form tab, including the default name "Form Responses 1". */
+export function formResponsesTab(tabs: SheetTab[]): SheetTab | undefined {
+  const exact = tabs.find(
+    (tab) => tab.title.trim().toLowerCase() === "form responses 1",
+  );
+  if (exact) return exact;
+  return (
+    tabs.find((tab) => /form responses/i.test(tab.title)) ??
+    tabs.find((tab) => /response/i.test(tab.title)) ??
+    tabs[0]
+  );
+}
+
+/**
+ * Map a Form Responses sheet.
+ * Expected headers: Timestamp, Your Name, Date:, Available Saturday?, Available Sunday?, Notes:
+ */
 export function openHouseRowsFromTable(table: string[][]): OpenHouseRow[] {
   if (!table.length) return [];
-  const headers = table[0].map((cell) => cell.trim().toLowerCase());
+  const headers = table[0].map(normalizeHeader);
   const looksLikeHeader = headers.some((cell) =>
-    /name|agent|email|time|date|avail|timestamp|who|day|shift/.test(cell),
+    /name|date|saturday|sunday|notes|timestamp|avail/.test(cell),
   );
   const body = looksLikeHeader ? table.slice(1) : table;
   const headerRow = looksLikeHeader ? headers : [];
-  const timestamp = headerRow.length ? headerIndex(headerRow, ["timestamp"]) : -1;
-  let agentCol = headerRow.length
-    ? headerIndex(headerRow, ["agent", "name", "who"])
+  const timestampCol = headerRow.length ? columnIndex(headerRow, ["timestamp"]) : -1;
+  const nameCol = headerRow.length
+    ? columnIndex(headerRow, ["your name", "name", "agent"])
     : 0;
-  let windowCol = headerRow.length
-    ? headerIndex(headerRow, ["window", "when", "date", "time", "day", "shift"])
+  const dateCol = headerRow.length
+    ? columnIndex(headerRow, ["date", "weekend date"])
     : 1;
-  let coverageCol = headerRow.length
-    ? headerIndex(headerRow, ["avail", "coverage", "status", "response", "note"])
+  const saturdayCol = headerRow.length
+    ? columnIndex(headerRow, ["available saturday", "saturday", "sat"])
     : 2;
-  if (agentCol < 0) {
-    agentCol = headerRow.findIndex((_, index) => index !== timestamp);
-  }
-  if (windowCol < 0) {
-    windowCol = headerRow.findIndex(
-      (_, index) => index !== timestamp && index !== agentCol,
-    );
-  }
-  if (coverageCol < 0) coverageCol = -1;
+  const sundayCol = headerRow.length
+    ? columnIndex(headerRow, ["available sunday", "sunday", "sun"])
+    : 3;
+  const notesCol = headerRow.length ? columnIndex(headerRow, ["notes", "note"]) : 4;
 
-  return body
-    .map((row) => ({
-      agent: (row[agentCol] ?? "").trim(),
-      window: windowCol >= 0 ? (row[windowCol] ?? "").trim() : "",
-      coverage: coverageCol >= 0 ? (row[coverageCol] ?? "").trim() : "",
-    }))
-    .filter((row) => row.agent || row.window || row.coverage);
+  const rows = body
+    .map((row) => {
+      const agent = cell(row, nameCol);
+      const window = cell(row, dateCol);
+      const saturday = cell(row, saturdayCol);
+      const sunday = cell(row, sundayCol);
+      const notes = cell(row, notesCol);
+      const submittedAt = cell(row, timestampCol);
+      const coverage = [
+        saturday ? `Sat ${saturday}` : "",
+        sunday ? `Sun ${sunday}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return { agent, window, coverage, saturday, sunday, notes, submittedAt };
+    })
+    .filter(
+      (row) => row.agent || row.window || row.saturday || row.sunday || row.notes,
+    );
+
+  const dated = rows.some((row) => timeValue(row.submittedAt ?? "") > 0);
+  if (dated) {
+    rows.sort(
+      (a, b) => timeValue(b.submittedAt ?? "") - timeValue(a.submittedAt ?? ""),
+    );
+  } else {
+    rows.reverse();
+  }
+  return rows.map(({ submittedAt: _submittedAt, ...row }) => row);
 }

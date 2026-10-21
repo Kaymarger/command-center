@@ -1,7 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { emptyFeeds, type LiveFeeds } from "@/lib/dashboard-data";
+import {
+  emptyFeeds,
+  type LiveFeeds,
+  type SheetCardErrors,
+} from "@/lib/dashboard-data";
 import type { BotArtifact } from "@/lib/artifacts";
 import type { BotJob } from "@/lib/bot-store";
 
@@ -14,6 +18,7 @@ export function useLiveFeeds() {
   const [error, setError] = useState<string | null>(null);
   const [sheetError, setSheetError] = useState<string | null>(null);
   const [openHouseError, setOpenHouseError] = useState<string | null>(null);
+  const [cardErrors, setCardErrors] = useState<SheetCardErrors | null>(null);
   const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
@@ -33,6 +38,7 @@ export function useLiveFeeds() {
         const feedsData = (await feedsRes.json()) as LiveFeeds & {
           sheetError?: string | null;
           openHouseError?: string | null;
+          cardErrors?: SheetCardErrors | null;
         };
         const draftsData = draftsRes.ok
           ? ((await draftsRes.json()) as { drafts: BotJob[] })
@@ -47,6 +53,7 @@ export function useLiveFeeds() {
           setFeeds({ ...emptyFeeds(), ...feedsData });
           setSheetError(feedsData.sheetError ?? null);
           setOpenHouseError(feedsData.openHouseError ?? null);
+          setCardErrors(feedsData.cardErrors ?? null);
           setDrafts(draftsData.drafts ?? []);
           setJobs(jobsData.jobs ?? []);
           setArtifacts(artifactsData.artifacts ?? []);
@@ -132,6 +139,7 @@ export function useLiveFeeds() {
     error,
     sheetError,
     openHouseError,
+    cardErrors,
     syncing,
     syncFromSheet,
   };
