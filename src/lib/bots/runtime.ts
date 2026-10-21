@@ -1,11 +1,7 @@
 import type { BotArtifact } from "@/lib/artifacts";
 import type { BotTarget } from "@/lib/ops-actions";
 import { botLabel } from "@/lib/ops-actions";
-import {
-  emailDeliveryLabel,
-  emailJobToBot,
-  botEmailAddress,
-} from "@/lib/bot-email";
+import { botEmailAddress } from "@/lib/bot-email";
 import { defaultBotWebhookUrl } from "@/lib/bot-webhook-urls";
 import {
   enqueueGmail,
@@ -107,14 +103,22 @@ function buildPlainEnglishSummary(
   return parts.join(" ");
 }
 
+function webhookSettingNames(bot: BotTarget): { urlName: string; keyName: string } | null {
+  if (bot === "none") return null;
+  return { urlName: botEnvKeys[bot], keyName: botAuthEnvKeys[bot] };
+}
+
 async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
+  const names = webhookSettingNames(job.bot);
+  const label = botLabel(job.bot);
   const url = externalBotUrl(job.bot);
-  if (!url) {
+  if (!url || !names) {
+    const urlName = names?.urlName ?? "BOT_*_URL";
     return {
       forwarded: false as const,
       delivery: {
         status: "not_configured" as const,
-        error: `No webhook URL set for ${botLabel(job.bot)}. Add the BOT_*_URL for this bot.`,
+        error: `The ${label} webhook address is missing. Add ${urlName} on the host, then send this job again.`,
       },
     };
   }
@@ -122,13 +126,11 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
   const plainEnglishSummary = buildPlainEnglishSummary(job, input);
   const authKey = externalBotAuthKey(job.bot);
   if (!authKey) {
-    const authEnvName =
-      job.bot === "none" ? "BOT_*_KEY" : botAuthEnvKeys[job.bot];
     return {
       forwarded: false as const,
       delivery: {
         status: "not_configured" as const,
-        error: `Webhook URL is set for ${botLabel(job.bot)}, but its auth key is missing. Add ${authEnvName}.`,
+        error: `The ${label} key is missing. Add ${names.keyName} on the host. ${names.urlName} is already set.`,
       },
     };
   }
@@ -170,7 +172,7 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
         forwarded: false as const,
         delivery: {
           status: "failed" as const,
-          error: `${botLabel(job.bot)} webhook returned ${res.status}`,
+          error: `The ${label} did not accept this job (response ${res.status}). Check ${names.urlName} and ${names.keyName} on the host.`,
           sentAt: new Date().toISOString(),
         },
       };
@@ -183,15 +185,12 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
         sentAt: new Date().toISOString(),
       },
     };
-  } catch (error) {
+  } catch {
     return {
       forwarded: false as const,
       delivery: {
         status: "failed" as const,
-        error:
-          error instanceof Error
-            ? error.message
-            : `Could not reach ${botLabel(job.bot)} webhook`,
+        error: `The ${label} could not be reached. Check that ${names.urlName} on the host is the right webhook address.`,
         sentAt: new Date().toISOString(),
       },
     };
@@ -712,7 +711,7 @@ export async function dispatchToBot(
 
     for (const artifact of artifacts) addArtifact(artifact);
 
-    // Primary link: POST the job to the bot's webhook (BOT_*_URL + Bearer key)
+    // Jobs go out only by webhook address plus bearer key.
     if (job.bot !== "none") {
       const external = await forwardToExternalBot(job, input);
       job = { ...job, webhookDelivery: external.delivery };
@@ -720,43 +719,16 @@ export async function dispatchToBot(
       if (external.forwarded) {
         job = {
           ...job,
-          result: `${job.result ?? "Done"} Sent to ${botLabel(job.bot)} webhook.`,
-        };
-      } else if (external.delivery.status === "failed") {
-        job = {
-          ...job,
-          result: `${job.result ?? "Done"} Webhook failed: ${external.delivery.error ?? "unknown error"}`,
-          status: "error",
+          result: `Sent to the ${botLabel(job.bot)}.`,
         };
       } else {
-        // Optional fallback: email the bot only when webhook isn't configured
-        const emailDelivery = await emailJobToBot({
-          job,
-          primaryValue: input.primaryValue,
-          secondaryValue: input.secondaryValue,
-          detailsValue: input.detailsValue,
-          copies: input.copies,
-          deliveryMode: input.deliveryMode,
-          conveyancingMode: input.conveyancingMode,
-        });
-        job = { ...job, emailDelivery };
-
-        if (emailDelivery.status === "sent") {
-          job = {
-            ...job,
-            result: `${job.result ?? "Done"} No webhook yet — ${emailDeliveryLabel(emailDelivery)}.`,
-          };
-        } else if (emailDelivery.status === "failed") {
-          job = {
-            ...job,
-            result: `${job.result ?? "Done"} ${emailDeliveryLabel(emailDelivery)}`,
-          };
-        } else {
-          job = {
-            ...job,
-            result: `${job.result ?? "Done"} (${external.delivery.error ?? `Waiting for ${botLabel(job.bot)} webhook URL and key.`})`,
-          };
-        }
+        job = {
+          ...job,
+          result:
+            external.delivery.error ??
+            `The ${botLabel(job.bot)} did not receive this job.`,
+          status: "error",
+        };
       }
     }
 
@@ -784,8 +756,10 @@ export function botModeLabel(bot: BotTarget): string {
   if (bot === "none") return "Local";
   if (externalBotUrl(bot) && externalBotAuthKey(bot)) return "Webhook linked";
   if (externalBotUrl(bot) && !externalBotAuthKey(bot)) {
-    return "Webhook URL set — auth key missing";
+    return "Webhook address set — key missing";
   }
-  if (botEmailAddress(bot)) return "Email fallback";
+  if (!externalBotUrl(bot) && externalBotAuthKey(bot)) {
+    return "Key set — webhook address missing";
+  }
   return "Not linked yet";
 }

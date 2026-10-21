@@ -51,11 +51,9 @@ BOT_WORK_ROUTINE_KEY=
 BOT_TRANSACTION_KEY=
 ```
 
-Each job POST includes `Authorization: Bearer <key>` and a plain-English `plainEnglishSummary` / `task` describing what to do.
+Each job POST includes `Authorization: Bearer <key>` and a plain-English `plainEnglishSummary` / `task` describing what to do. Sending uses the webhook address and key only. A missing `BOT_*_EMAIL` does not block a job.
 
-The UI shows **Sent to bot**, **Send failed**, or **Not linked**.
-
-Optional: if a webhook isn’t set up, Ops can fall back to emailing that bot.
+The UI shows **Sent to bot** when the webhook accepted the job. If the address or key is missing, or the bot does not accept the job, the screen names the exact setting to fix.
 
 ## Enter in app → bot completes
 

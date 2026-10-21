@@ -15,14 +15,8 @@ import {
   type NestedOption,
   type OpsAction,
 } from "@/lib/ops-actions";
-import type { EmailDelivery } from "@/lib/bot-email";
-import {
-  EmailDeliveryBadge,
-  EmailDeliveryDetail,
-} from "@/components/email-delivery-badge";
 import {
   WebhookDeliveryBadge,
-  WebhookDeliveryDetail,
   type WebhookDelivery,
 } from "@/components/webhook-delivery-badge";
 import { Button } from "@/components/ui/button";
@@ -49,12 +43,12 @@ type AgentRow = { agent: string; window: string; coverage: string };
 
 export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
   const [submitted, setSubmitted] = useState(false);
+  const [sendFailed, setSendFailed] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [composeUrl, setComposeUrl] = useState<string | null>(null);
   const [webhookDelivery, setWebhookDelivery] = useState<
     WebhookDelivery | undefined
   >();
-  const [emailDelivery, setEmailDelivery] = useState<EmailDelivery | undefined>();
   const [pending, startTransition] = useTransition();
   const [path, setPath] = useState<NestedOption[]>([]);
   const [otherText, setOtherText] = useState("");
@@ -71,10 +65,10 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
 
   function resetLocal() {
     setSubmitted(false);
+    setSendFailed(false);
     setSuccessMessage("");
     setComposeUrl(null);
     setWebhookDelivery(undefined);
-    setEmailDelivery(undefined);
     setPath([]);
     setOtherText("");
     setWhenText("");
@@ -240,23 +234,33 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
             status?: string;
             composeUrl?: string;
             webhookDelivery?: WebhookDelivery;
-            emailDelivery?: EmailDelivery;
           };
           error?: string;
         };
 
         if (!res.ok || data.job?.status === "error") {
-          throw new Error(data.error || data.job?.result || "Bot dispatch failed");
+          setSendFailed(true);
+          setSuccessMessage(
+            data.job?.result ||
+              data.error ||
+              "This job was not sent. Check the bot webhook address and key on the host."
+          );
+          setWebhookDelivery(data.job?.webhookDelivery);
+          setSubmitted(true);
+          return;
         }
 
+        setSendFailed(false);
         setSuccessMessage(data.job?.result || action.successHint);
         setComposeUrl(data.job?.composeUrl ?? null);
         setWebhookDelivery(data.job?.webhookDelivery);
-        setEmailDelivery(data.job?.emailDelivery);
         setSubmitted(true);
       } catch (error) {
+        setSendFailed(true);
         setSuccessMessage(
-          error instanceof Error ? error.message : "Could not reach bots."
+          error instanceof Error
+            ? error.message
+            : "This job was not sent. The command center could not be reached."
         );
         setSubmitted(true);
       }
@@ -291,28 +295,30 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
 
         {submitted ? (
           <div className="flex flex-col items-center gap-3 py-8 text-center animate-rise">
-            <span className="flex size-12 items-center justify-center rounded-full bg-[#1F6598]/25 text-[#7395B8]">
-              <CheckCircle2 className="size-6" />
+            <span
+              className={
+                sendFailed
+                  ? "flex size-12 items-center justify-center rounded-full bg-red-500/15 text-red-300"
+                  : "flex size-12 items-center justify-center rounded-full bg-[#1F6598]/25 text-[#7395B8]"
+              }
+            >
+              {sendFailed ? <X className="size-6" /> : <CheckCircle2 className="size-6" />}
             </span>
             <div>
               <p className="font-heading text-lg text-foreground">
-                Sent to bot
+                {sendFailed ? "Job was not sent" : "Sent to bot"}
               </p>
               <p className="mt-1 text-sm text-muted-foreground">{successMessage}</p>
-              <div className="mt-3 flex flex-col items-center gap-1.5">
-                <WebhookDeliveryBadge delivery={webhookDelivery} />
-                <WebhookDeliveryDetail delivery={webhookDelivery} />
-                {emailDelivery &&
-                webhookDelivery?.status === "not_configured" ? (
-                  <>
-                    <EmailDeliveryBadge delivery={emailDelivery} />
-                    <EmailDeliveryDetail delivery={emailDelivery} />
-                  </>
-                ) : null}
-              </div>
-              <p className="mt-2 text-xs text-[#7395B8]">
-                {botLabel(effectiveBot)} will complete this
-              </p>
+              {webhookDelivery ? (
+                <div className="mt-3 flex flex-col items-center gap-1.5">
+                  <WebhookDeliveryBadge delivery={webhookDelivery} />
+                </div>
+              ) : null}
+              {sendFailed ? null : (
+                <p className="mt-2 text-xs text-[#7395B8]">
+                  {botLabel(effectiveBot)} will complete this
+                </p>
+              )}
             </div>
             {composeUrl ? (
               <a

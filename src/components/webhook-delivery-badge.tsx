@@ -64,19 +64,18 @@ export function WebhookDeliveryDetail({
     );
   }
 
-  if (delivery.status === "failed") {
-    return (
-      <p className="mt-1.5 text-xs text-red-300/90">
-        Could not reach the bot
-        {delivery.error ? `: ${delivery.error}` : "."}
-      </p>
-    );
-  }
-
   return (
-    <p className="mt-1.5 text-xs text-amber-200/90">
+    <p
+      className={
+        delivery.status === "failed"
+          ? "mt-1.5 text-xs text-red-300/90"
+          : "mt-1.5 text-xs text-amber-200/90"
+      }
+    >
       {delivery.error ||
-        "This bot’s webhook URL is not set yet — paste it when you have it."}
+        (delivery.status === "failed"
+          ? "This job was not sent. Check the bot webhook address and key on the host."
+          : "This bot’s webhook address or key is not set on the host yet.")}
     </p>
   );
 }

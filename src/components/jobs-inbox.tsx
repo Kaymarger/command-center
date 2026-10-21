@@ -8,10 +8,6 @@ import {
   WebhookDeliveryBadge,
   WebhookDeliveryDetail,
 } from "@/components/webhook-delivery-badge";
-import {
-  EmailDeliveryBadge,
-  EmailDeliveryDetail,
-} from "@/components/email-delivery-badge";
 import { useLiveFeeds } from "@/hooks/use-live-feeds";
 import { cn } from "@/lib/utils";
 
@@ -91,16 +87,8 @@ export function JobsInbox() {
                 ) : null}
                 {job.bot !== "none" ? (
                   <>
-                    <WebhookDeliveryDetail delivery={job.webhookDelivery} />
-                    {job.emailDelivery &&
-                    job.webhookDelivery?.status === "not_configured" ? (
-                      <>
-                        <EmailDeliveryBadge
-                          delivery={job.emailDelivery}
-                          className="mt-1.5"
-                        />
-                        <EmailDeliveryDetail delivery={job.emailDelivery} />
-                      </>
+                    {job.result !== job.webhookDelivery?.error ? (
+                      <WebhookDeliveryDetail delivery={job.webhookDelivery} />
                     ) : null}
                   </>
                 ) : null}

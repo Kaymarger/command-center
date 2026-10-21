@@ -42,11 +42,11 @@ export function BotLivePanel({ botId, botLabel }: BotLivePanelProps) {
     <div className="mt-8 grid gap-4">
       <div className="rounded-2xl border border-[#7395B8]/30 bg-white/[0.06] p-5 backdrop-blur-xl">
         <p className="text-sm leading-relaxed text-muted-foreground">
-          You enter work in the command center; {botLabel} receives the job via
-          its webhook. Set{" "}
-          <code className="text-foreground/90">BOT_*_URL</code> and{" "}
-          <code className="text-foreground/90">BOT_*_KEY</code>. Email is only
-          used if a webhook isn’t set up yet.
+          You enter work in the command center; {botLabel} receives the job at
+          its webhook. Each bot needs its webhook address (
+          <code className="text-foreground/90">BOT_*_URL</code>) and key (
+          <code className="text-foreground/90">BOT_*_KEY</code>). A missing
+          email address does not block sending.
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <Button onClick={() => void refreshFeeds()} disabled={refreshing}>

@@ -247,18 +247,7 @@ export async function emailJobToBot(
 
   const built = buildBotJobEmail(payload);
   if (!built) {
-    const key =
-      job.bot === "work-routine"
-        ? "BOT_WORK_ROUTINE_EMAIL"
-        : job.bot === "transaction"
-          ? "BOT_TRANSACTION_EMAIL"
-          : job.bot === "listings"
-            ? "BOT_LISTINGS_EMAIL"
-            : "BOT_MANAGER_EMAIL";
-    return {
-      status: "not_configured",
-      error: `No email address set for ${botLabel(job.bot)}. Add ${key} in settings.`,
-    };
+    return { status: "skipped" };
   }
 
   const transport = emailTransportConfigured();
