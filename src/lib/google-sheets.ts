@@ -126,89 +126,318 @@ export type SheetTab = {
   valuesKeyPresent?: boolean;
 };
 
+export const FORM_RESPONSES_TAB = "Form Responses 1";
+
+/** How long a successful values.batchGet can be reused. */
+export const SHEET_VALUE_CACHE_MS = 60_000;
+
+/** How long we remember which tabs exist, so a missing tab is not requested again. */
+const SHEET_PLAN_TTL_MS = 10 * 60_000;
+
+export class GoogleReadError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "GoogleReadError";
+    this.status = status;
+  }
+}
+
+export function isQuotaError(error: unknown): boolean {
+  if (error instanceof GoogleReadError && error.status === 429) return true;
+  const message = error instanceof Error ? error.message : "";
+  return /quota exceeded|read requests per minute per user/i.test(message);
+}
+
+export function isMissingRangeError(error: unknown): boolean {
+  if (!(error instanceof GoogleReadError) || error.status !== 400) return false;
+  return /unable to parse range/i.test(error.message);
+}
+
+export type WantedTab = { title: string; sheetId?: number };
+
+type ListedTab = { title: string; sheetId: number };
+type ValueCacheEntry = { at: number; tabs: SheetTab[] };
+type PlanEntry = { at: number; fetch: ListedTab[]; missing: string[] };
+type ReadState = {
+  reads: number[];
+  now: (() => number) | null;
+  values: Map<string, ValueCacheEntry>;
+  plans: Map<string, PlanEntry>;
+  inflight: Map<string, Promise<unknown>>;
+};
+
+function readState(): ReadState {
+  const g = globalThis as typeof globalThis & { __areg_sheet_reads_state__?: ReadState };
+  if (!g.__areg_sheet_reads_state__) {
+    g.__areg_sheet_reads_state__ = {
+      reads: [],
+      now: null,
+      values: new Map(),
+      plans: new Map(),
+      inflight: new Map(),
+    };
+  }
+  return g.__areg_sheet_reads_state__;
+}
+
+export function sheetNow(): number {
+  return readState().now?.() ?? Date.now();
+}
+
+export function setSheetClock(now: (() => number) | null) {
+  readState().now = now;
+}
+
+export function resetSheetReadState() {
+  const state = readState();
+  state.reads = [];
+  state.values.clear();
+  state.plans.clear();
+  state.inflight.clear();
+}
+
+export function sheetReadsSince(startMs: number): number {
+  return readState().reads.filter((at) => at >= startMs).length;
+}
+
+function noteSheetRead() {
+  const state = readState();
+  const now = sheetNow();
+  state.reads.push(now);
+  const cutoff = now - 10 * 60_000;
+  if (state.reads.length > 40) {
+    state.reads = state.reads.filter((at) => at >= cutoff);
+  }
+}
+
+function shareInflight<T>(key: string, run: () => Promise<T>): Promise<T> {
+  const state = readState();
+  const existing = state.inflight.get(key);
+  if (existing) return existing as Promise<T>;
+  const pending = run().finally(() => {
+    if (state.inflight.get(key) === pending) state.inflight.delete(key);
+  });
+  state.inflight.set(key, pending);
+  return pending;
+}
+
 function quotedRange(title: string): string {
   const escaped = title.replace(/'/g, "''");
   return `'${escaped}'!A:Z`;
 }
 
-async function googleFailure(res: Response, label: string): Promise<string> {
-  let detail = "";
-  try {
-    const body = (await res.json()) as { error?: { message?: string } };
-    detail = body.error?.message?.trim() ?? "";
-  } catch {
-    detail = "";
-  }
-  return detail
-    ? `Google could not read ${label} (HTTP ${res.status}): ${detail}`
-    : `Google could not read ${label} (HTTP ${res.status}).`;
+function sameTitle(left: string, right: string): boolean {
+  if (left.trim().toLowerCase() === right.trim().toLowerCase()) return true;
+  const norm = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const a = norm(left);
+  const b = norm(right);
+  return a.length > 0 && a === b;
 }
 
-async function googleGet(url: string, token: string): Promise<Response> {
-  return fetch(url, {
-    cache: "no-store",
-    headers: { Authorization: `Bearer ${token}` },
+function googleError(status: number, body: unknown, label: string, email?: string): GoogleReadError {
+  const detail =
+    (body as { error?: { message?: string } } | null)?.error?.message?.trim() ?? "";
+  let message = detail
+    ? `Google could not read ${label} (HTTP ${status}): ${detail}`
+    : `Google could not read ${label} (HTTP ${status}).`;
+  if (status === 403 && email) {
+    message += ` Share the sheet with ${email} as a Viewer or Editor.`;
+  }
+  if (status === 404) {
+    message += " Check the spreadsheet id on the host.";
+  }
+  return new GoogleReadError(status, message);
+}
+
+async function googleJson(
+  url: string,
+  token: string,
+): Promise<{ status: number; body: unknown }> {
+  return shareInflight(`GET ${url}`, async () => {
+    noteSheetRead();
+    const res = await fetch(url, {
+      cache: "no-store",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const body = (await res.json().catch(() => ({}))) as unknown;
+    return { status: res.status, body };
   });
 }
 
-export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]> {
-  const { token, email } = await accessToken();
-  const metaRes = await googleGet(
-    `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(title,sheetId)`,
-    token,
+function cellsFrom(values: unknown): string[][] {
+  if (!Array.isArray(values)) return [];
+  return values.map((row) =>
+    Array.isArray(row) ? row.map((cell) => (cell == null ? "" : String(cell))) : [],
   );
-  if (!metaRes.ok) {
-    const detail = await googleFailure(metaRes, "the spreadsheet");
-    if (metaRes.status === 403) {
-      throw new Error(
-        `${detail} Share the sheet with ${email} as a Viewer or Editor.`,
-      );
-    }
-    if (metaRes.status === 404) {
-      throw new Error(`${detail} Check the spreadsheet id on the host.`);
-    }
-    throw new Error(detail);
-  }
-  const meta = (await metaRes.json()) as {
-    sheets?: { properties?: { title?: string; sheetId?: number } }[];
-  };
-  const tabs = meta.sheets ?? [];
-  const loaded: SheetTab[] = [];
-  for (const tab of tabs) {
-    const title = tab.properties?.title?.trim() || "Sheet";
-    const sheetId = tab.properties?.sheetId ?? 0;
-    const range = quotedRange(title);
-    const valuesRes = await googleGet(
-      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueRenderOption=FORMATTED_VALUE`,
-      token,
-    );
-    if (!valuesRes.ok) {
-      loaded.push({
-        title,
-        sheetId,
-        rows: [],
-        error: await googleFailure(valuesRes, `the “${title}” tab`),
-      });
+}
+
+function titleFromRange(range: string | undefined, fallback: string): string {
+  if (!range) return fallback;
+  const quoted = range.match(/^'((?:''|[^'])*)'!/);
+  if (quoted) return quoted[1].replace(/''/g, "'");
+  const plain = range.match(/^([^!]+)!/);
+  return plain?.[1] ?? fallback;
+}
+
+function emptyTab(title: string, sheetId = 0): SheetTab {
+  return { title, sheetId, rows: [], valuesKeyPresent: true };
+}
+
+function dedupeWanted(wanted: WantedTab[]): WantedTab[] {
+  const out: WantedTab[] = [];
+  for (const item of wanted) {
+    const title = item.title.trim();
+    if (!title) continue;
+    const existing = out.find((row) => sameTitle(row.title, title));
+    if (existing) {
+      if (existing.sheetId == null && item.sheetId != null) existing.sheetId = item.sheetId;
       continue;
     }
-    const values = (await valuesRes.json()) as {
-      range?: string;
-      values?: unknown;
-    };
-    const rawRows = Array.isArray(values.values) ? values.values : [];
-    loaded.push({
-      title,
-      sheetId,
-      reportedRange: typeof values.range === "string" ? values.range : undefined,
-      valuesKeyPresent: Array.isArray(values.values),
-      rows: rawRows.map((row) =>
-        Array.isArray(row)
-          ? row.map((cell) => (cell == null ? "" : String(cell)))
-          : [],
-      ),
-    });
+    out.push({ title, sheetId: item.sheetId });
   }
-  return loaded;
+  return out;
+}
+
+async function batchGetOnce(
+  spreadsheetId: string,
+  tabs: ListedTab[],
+): Promise<SheetTab[]> {
+  if (!tabs.length) return [];
+  const { token, email } = await accessToken();
+  const params = new URLSearchParams();
+  params.set("valueRenderOption", "FORMATTED_VALUE");
+  params.set("majorDimension", "ROWS");
+  for (const tab of tabs) params.append("ranges", quotedRange(tab.title));
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values:batchGet?${params.toString()}`;
+  const { status, body } = await googleJson(url, token);
+  if (status !== 200) {
+    throw googleError(status, body, "the spreadsheet", email);
+  }
+  const valueRanges =
+    (body as { valueRanges?: { range?: string; values?: unknown }[] }).valueRanges ?? [];
+  return tabs.map((tab, index) => {
+    const entry = valueRanges[index];
+    const values = entry?.values;
+    return {
+      title: titleFromRange(entry?.range, tab.title),
+      sheetId: tab.sheetId,
+      reportedRange: typeof entry?.range === "string" ? entry.range : undefined,
+      valuesKeyPresent: Array.isArray(values),
+      rows: cellsFrom(values),
+    };
+  });
+}
+
+async function batchGetCached(spreadsheetId: string, tabs: ListedTab[]): Promise<SheetTab[]> {
+  if (!tabs.length) return [];
+  const key = `${spreadsheetId}\n${tabs.map((tab) => tab.title).join("\n")}`;
+  const state = readState();
+  const hit = state.values.get(key);
+  if (hit && sheetNow() - hit.at < SHEET_VALUE_CACHE_MS) return hit.tabs;
+  return shareInflight(`values:${key}`, async () => {
+    const again = state.values.get(key);
+    if (again && sheetNow() - again.at < SHEET_VALUE_CACHE_MS) return again.tabs;
+    const loaded = await batchGetOnce(spreadsheetId, tabs);
+    state.values.set(key, { at: sheetNow(), tabs: loaded });
+    return loaded;
+  });
+}
+
+async function listSheetProperties(spreadsheetId: string): Promise<ListedTab[]> {
+  return shareInflight(`meta:${spreadsheetId}`, async () => {
+    const { token, email } = await accessToken();
+    const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(title,sheetId)`;
+    const { status, body } = await googleJson(url, token);
+    if (status !== 200) throw googleError(status, body, "the spreadsheet", email);
+    const sheets =
+      (body as { sheets?: { properties?: { title?: string; sheetId?: number } }[] }).sheets ??
+      [];
+    return sheets.map((sheet) => ({
+      title: sheet.properties?.title?.trim() || "Sheet",
+      sheetId: sheet.properties?.sheetId ?? 0,
+    }));
+  });
+}
+
+function matchListed(want: WantedTab, listed: ListedTab[]): ListedTab | undefined {
+  if (want.sheetId != null) {
+    const byId = listed.find((tab) => tab.sheetId === want.sheetId);
+    if (byId) return byId;
+  }
+  return listed.find((tab) => sameTitle(tab.title, want.title));
+}
+
+/**
+ * Read every requested tab with one spreadsheets.values.batchGet.
+ * Tabs that are not in the spreadsheet come back empty. With discoverMissing,
+ * a missing name is learned once and then left out of later batch calls.
+ */
+export async function readNamedTabs(
+  spreadsheetId: string,
+  wanted: WantedTab[],
+  options?: { discoverMissing?: boolean },
+): Promise<SheetTab[]> {
+  const names = dedupeWanted(wanted);
+  const planKey = `${spreadsheetId}|${names.map((tab) => tab.title).join("|")}|${options?.discoverMissing ? "discover" : "exact"}`;
+  const state = readState();
+  const plan = options?.discoverMissing ? state.plans.get(planKey) : undefined;
+  if (plan && sheetNow() - plan.at < SHEET_PLAN_TTL_MS) {
+    try {
+      const fetched = await batchGetCached(spreadsheetId, plan.fetch);
+      return [...fetched, ...plan.missing.map((title) => emptyTab(title))];
+    } catch (error) {
+      if (isQuotaError(error) || !isMissingRangeError(error)) throw error;
+      state.plans.delete(planKey);
+    }
+  }
+
+  const requested = names.map((tab) => ({ title: tab.title, sheetId: tab.sheetId ?? 0 }));
+  try {
+    const fetched = await batchGetCached(spreadsheetId, requested);
+    if (options?.discoverMissing) {
+      state.plans.set(planKey, {
+        at: sheetNow(),
+        fetch: requested,
+        missing: [],
+      });
+    }
+    return fetched;
+  } catch (error) {
+    if (!options?.discoverMissing && isMissingRangeError(error)) {
+      const empty = names.map((tab) => emptyTab(tab.title, tab.sheetId ?? 0));
+      state.values.set(
+        `${spreadsheetId}\n${names.map((tab) => tab.title).join("\n")}`,
+        { at: sheetNow(), tabs: empty },
+      );
+      return empty;
+    }
+    if (!options?.discoverMissing || !isMissingRangeError(error)) throw error;
+    const listed = await listSheetProperties(spreadsheetId);
+    const fetch: ListedTab[] = [];
+    const missing: string[] = [];
+    const seen = new Set<string>();
+    for (const want of names) {
+      const found = matchListed(want, listed);
+      if (!found) {
+        missing.push(want.title);
+        continue;
+      }
+      const key = found.title.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      fetch.push(found);
+    }
+    const loaded = await batchGetCached(spreadsheetId, fetch);
+    state.plans.set(planKey, { at: sheetNow(), fetch, missing });
+    return [...loaded, ...missing.map((title) => emptyTab(title))];
+  }
+}
+
+export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]> {
+  const listed = await listSheetProperties(spreadsheetId);
+  return batchGetCached(spreadsheetId, listed);
 }
 
 export async function readPublicCsv(spreadsheetId: string, gid: number): Promise<string[][]> {

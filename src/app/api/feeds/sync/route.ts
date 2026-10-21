@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { setFeeds } from "@/lib/bot-store";
-import { syncFeedsFromGoogleSheet } from "@/lib/sheet-sync";
+import { loadDashboardFeeds } from "@/lib/sheet-sync";
 import { requireUserSession } from "@/lib/ops-guard";
 
 export const dynamic = "force-dynamic";
@@ -10,12 +10,12 @@ export async function POST() {
   if (denied) return denied;
 
   try {
-    const synced = await syncFeedsFromGoogleSheet();
-    await setFeeds(synced.feeds);
+    const payload = await loadDashboardFeeds();
+    await setFeeds(payload.feeds);
     return NextResponse.json({
       ok: true,
-      feeds: synced.feeds,
-      cardErrors: synced.cardErrors,
+      feeds: payload.feeds,
+      cardErrors: payload.cardErrors,
     });
   } catch (error) {
     return NextResponse.json(

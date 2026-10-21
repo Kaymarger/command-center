@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import {
   emptyFeeds,
+  LIVE_FEED_POLL_MS,
   preferLiveFeeds,
   type LiveFeeds,
   type SheetCardErrors,
@@ -51,7 +52,9 @@ export function useLiveFeeds() {
           ? ((await artifactsRes.json()) as { artifacts: BotArtifact[] })
           : { artifacts: [] };
         if (!cancelled) {
-          setFeeds({ ...emptyFeeds(), ...feedsData });
+          setFeeds((current) =>
+            preferLiveFeeds(current, { ...emptyFeeds(), ...feedsData }),
+          );
           setSheetError(feedsData.sheetError ?? null);
           setOpenHouseError(feedsData.openHouseError ?? null);
           setCardErrors(feedsData.cardErrors ?? null);
@@ -102,7 +105,7 @@ export function useLiveFeeds() {
       /* EventSource unavailable */
     }
 
-    pollId = window.setInterval(() => void pullOnce(), 8000);
+    pollId = window.setInterval(() => void pullOnce(), LIVE_FEED_POLL_MS);
 
     return () => {
       cancelled = true;

@@ -356,10 +356,7 @@ function tabRows(
   key: OpsCardKey,
 ): string[][] | null {
   const tab = findNamedTab(tabs, tabName);
-  if (!tab) {
-    notes[key] = `The “${tabName}” tab was not found in the AREG Ops sheet.`;
-    return null;
-  }
+  if (!tab) return null;
   if (tab.error) {
     notes[key] = tab.error;
     return null;

@@ -134,6 +134,9 @@ export const AREG_OPS_SHEET_URL = AREG_OPS_SHEET_ID
   ? `https://docs.google.com/spreadsheets/d/${AREG_OPS_SHEET_ID}/edit`
   : "";
 
+/** Browser poll and server sheet cache. Kept at a minute so Google stays under the read quota. */
+export const LIVE_FEED_POLL_MS = 60_000;
+
 export const sheetTabs = {
   CINC: 2029945079,
   Anniversaries: 344359764,

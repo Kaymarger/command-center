@@ -1,6 +1,7 @@
 import {
   emptyFeeds,
   emptyOpsCards,
+  LIVE_FEED_POLL_MS,
   sheetTabs,
   summarizeOpenHouses,
   type LiveFeeds,
@@ -11,26 +12,32 @@ import { currentOpenHouseRows } from "@/lib/dashboard-text";
 import {
   findNamedTab,
   FIRM_TODO_TAB,
+  OPS_CARD_TABS,
   opsCardsFromTabs,
   transactionChecklistItems,
 } from "@/lib/ops-card-rows";
 import { feedsFromSheetTables } from "@/lib/feeds-io";
 import { reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
+  FORM_RESPONSES_TAB,
   formResponsesTab,
+  isQuotaError,
   loadServiceAccount,
   openHouseReadStats,
   openHouseRowsFromTable,
   openHouseSheetId,
   opsSheetId,
+  readNamedTabs,
   readPublicCsv,
-  readSpreadsheet,
+  sheetNow,
+  sheetReadsSince,
   transactionsSheetId,
   type OpenHouseReadStats,
   type SheetTab,
+  type WantedTab,
 } from "@/lib/google-sheets";
 
-export { OPS_CARD_TABS } from "@/lib/ops-card-rows";
+export { OPS_CARD_TABS };
 
 const TAB_MATCHES: {
   key: keyof typeof sheetTabs;
@@ -66,11 +73,48 @@ function blankCardErrors(): SheetCardErrors {
   };
 }
 
-type Cache = DashboardPayload & { at: number };
-
-const cacheGlobal = globalThis as typeof globalThis & {
-  __areg_sheet_cache__?: Cache;
+type DashboardStore = {
+  payload: DashboardPayload | null;
+  fetchedAt: number;
+  nextAttemptAt: number;
+  backoffMs: number;
+  inFlight: Promise<DashboardPayload> | null;
 };
+
+const BACKOFF_START_MS = 60_000;
+const BACKOFF_MAX_MS = 5 * 60_000;
+
+function dashboardStore(): DashboardStore {
+  const g = globalThis as typeof globalThis & { __areg_dashboard_cache__?: DashboardStore };
+  if (!g.__areg_dashboard_cache__) {
+    g.__areg_dashboard_cache__ = {
+      payload: null,
+      fetchedAt: 0,
+      nextAttemptAt: 0,
+      backoffMs: BACKOFF_START_MS,
+      inFlight: null,
+    };
+  }
+  return g.__areg_dashboard_cache__;
+}
+
+export function resetDashboardCacheForTests() {
+  const g = globalThis as typeof globalThis & { __areg_dashboard_cache__?: DashboardStore };
+  delete g.__areg_dashboard_cache__;
+}
+
+function opsWantedTabs(): WantedTab[] {
+  const legacy: WantedTab[] = [
+    { title: "CINC", sheetId: sheetTabs.CINC },
+    { title: "Anniversaries", sheetId: sheetTabs.Anniversaries },
+    { title: "Birthdays", sheetId: sheetTabs.Birthdays },
+    { title: "Referrals", sheetId: sheetTabs.Referrals },
+    { title: "OpenHouses", sheetId: sheetTabs.OpenHouses },
+    { title: "OutstandingEmails", sheetId: sheetTabs.OutstandingEmails },
+  ];
+  const cards = Object.values(OPS_CARD_TABS).map((spec) => ({ title: spec.tab }));
+  return [...legacy, ...cards];
+}
 
 function pickTab(
   tabs: SheetTab[],
@@ -85,11 +129,6 @@ function pickTab(
   const match = byGid ?? byName;
   if (!match) return { rows: [], found: false, error: null };
   return { rows: match.rows, found: true, error: match.error ?? null };
-}
-
-function missingTabMessage(label: string, titles: string[]): string {
-  const found = titles.length ? titles.join(", ") : "none";
-  return `The ${label} tab was not found in the dashboard sheet. Tabs Google returned: ${found}.`;
 }
 
 async function opsTables(): Promise<{
@@ -127,8 +166,9 @@ async function opsTables(): Promise<{
   if (loadServiceAccount()) {
     let tabs: SheetTab[] = [];
     try {
-      tabs = await readSpreadsheet(id);
+      tabs = await readNamedTabs(id, opsWantedTabs(), { discoverMissing: true });
     } catch (error) {
+      if (isQuotaError(error)) throw error;
       const message =
         error instanceof Error
           ? error.message
@@ -150,7 +190,6 @@ async function opsTables(): Promise<{
         tabs: [],
       };
     }
-    const titles = tabs.map((tab) => tab.title);
     const cinc = pickTab(tabs, sheetTabs.CINC, ["cinc"]);
     const anniversaries = pickTab(tabs, sheetTabs.Anniversaries, ["anniversar"]);
     const birthdays = pickTab(tabs, sheetTabs.Birthdays, ["birthday"]);
@@ -161,21 +200,11 @@ async function opsTables(): Promise<{
       "email",
     ]);
     const cardErrors: SheetCardErrors = {
-      cinc: cinc.error ?? (cinc.found ? null : missingTabMessage("CINC", titles)),
-      anniversaries:
-        anniversaries.error ??
-        (anniversaries.found ? null : missingTabMessage("Anniversaries", titles)),
-      birthdays:
-        birthdays.error ??
-        (birthdays.found ? null : missingTabMessage("Birthdays", titles)),
-      referrals:
-        referrals.error ??
-        (referrals.found ? null : missingTabMessage("Referrals", titles)),
-      emails:
-        outstandingEmails.error ??
-        (outstandingEmails.found
-          ? null
-          : missingTabMessage("Outstanding Emails", titles)),
+      cinc: cinc.error,
+      anniversaries: anniversaries.error,
+      birthdays: birthdays.error,
+      referrals: referrals.error,
+      emails: outstandingEmails.error,
     };
     return {
       cinc: cinc.rows,
@@ -245,14 +274,12 @@ async function readFirmTransactionTodos(): Promise<{
         error: "Add GOOGLE_SERVICE_ACCOUNT_JSON to read the firm-transaction checklist.",
       };
     }
-    const tabs = await readSpreadsheet(id);
+    const tabs = await readNamedTabs(id, [{ title: FIRM_TODO_TAB }]);
     const tab = findNamedTab(tabs, FIRM_TODO_TAB);
-    if (!tab) {
-      return { items: [], error: `The “${FIRM_TODO_TAB}” tab was not found.` };
-    }
-    if (tab.error) return { items: [], error: tab.error };
+    if (!tab || tab.error) return { items: [], error: tab?.error ?? null };
     return { items: transactionChecklistItems(tab.rows), error: null };
   } catch (error) {
+    if (isQuotaError(error)) throw error;
     return {
       items: [],
       error:
@@ -285,25 +312,16 @@ async function readOpenHouseForm(): Promise<
       if (unmapped) return { error: unmapped };
       return { rows: openHouseRowsFromTable(table) };
     }
-    const tabs = await readSpreadsheet(id);
+    const tabs = await readNamedTabs(id, [{ title: FORM_RESPONSES_TAB }]);
     const tab = formResponsesTab(tabs);
-    if (!tab) {
-      return { error: "Google opened the open-house sheet, but it has no tabs." };
-    }
-    if (tab.error) return { error: tab.error };
-    if (tab.rows.length === 0) {
-      const range = tab.reportedRange ? ` Range Google reported: ${tab.reportedRange}.` : "";
-      return {
-        error: tab.valuesKeyPresent
-          ? `Google opened the “${tab.title}” tab but the values array was empty.${range}`
-          : `Google opened the “${tab.title}” tab but the response had no values array.${range}`,
-      };
-    }
+    if (!tab || tab.error) return tab?.error ? { error: tab.error } : { rows: [] };
+    if (tab.rows.length === 0) return { rows: [] };
     const stats = openHouseReadStats(tab.rows);
     const unmapped = unmappedRowError(tab.title, stats);
     if (unmapped) return { error: unmapped };
     return { rows: openHouseRowsFromTable(tab.rows) };
   } catch (error) {
+    if (isQuotaError(error)) throw error;
     return {
       error:
         error instanceof Error
@@ -313,12 +331,38 @@ async function readOpenHouseForm(): Promise<
   }
 }
 
-export async function loadDashboardFeeds(): Promise<DashboardPayload> {
-  const cached = cacheGlobal.__areg_sheet_cache__;
-  if (cached && Date.now() - cached.at < 30_000) {
-    return cached;
-  }
+function quietPayload(): DashboardPayload {
+  return {
+    feeds: emptyFeeds(),
+    sheetError: null,
+    openHouseError: null,
+    cardErrors: blankCardErrors(),
+  };
+}
 
+function failurePayload(message: string): DashboardPayload {
+  const notes: LiveFeeds["opsCardNotes"] = {};
+  (Object.keys(emptyOpsCards()) as OpsCardKey[]).forEach((key) => {
+    notes[key] = message;
+  });
+  return {
+    feeds: {
+      ...emptyFeeds(),
+      opsCardNotes: notes,
+    },
+    sheetError: message,
+    openHouseError: message,
+    cardErrors: {
+      cinc: message,
+      referrals: message,
+      anniversaries: message,
+      birthdays: message,
+      emails: message,
+    },
+  };
+}
+
+async function buildPayload(): Promise<DashboardPayload> {
   let feeds = emptyFeeds();
   let sheetError: string | null = null;
   let cardErrors = blankCardErrors();
@@ -328,6 +372,7 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
     feeds = synced.feeds;
     cardErrors = synced.cardErrors;
   } catch (error) {
+    if (isQuotaError(error)) throw error;
     opsReadFailed = true;
     sheetError =
       error instanceof Error
@@ -386,18 +431,62 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
     },
   };
 
-  if (!opsReadFailed) {
-    await setFeeds(feeds);
-  }
+  if (!opsReadFailed) await setFeeds(feeds);
 
-  const payload: DashboardPayload = {
-    feeds,
-    sheetError,
-    openHouseError,
-    cardErrors,
+  return { feeds, sheetError, openHouseError, cardErrors };
+}
+
+async function refreshDashboard(): Promise<DashboardPayload> {
+  const box = dashboardStore();
+  try {
+    const payload = await buildPayload();
+    box.payload = payload;
+    box.fetchedAt = sheetNow();
+    box.nextAttemptAt = sheetNow() + LIVE_FEED_POLL_MS;
+    box.backoffMs = BACKOFF_START_MS;
+    return payload;
+  } catch (error) {
+    if (isQuotaError(error)) {
+      box.nextAttemptAt = sheetNow() + box.backoffMs;
+      box.backoffMs = Math.min(box.backoffMs * 2, BACKOFF_MAX_MS);
+      if (box.payload) return box.payload;
+      const quiet = quietPayload();
+      box.payload = quiet;
+      box.fetchedAt = sheetNow();
+      return quiet;
+    }
+    const message =
+      error instanceof Error ? error.message : "The dashboard sheet could not be read.";
+    const failed = failurePayload(message);
+    box.payload = failed;
+    box.fetchedAt = sheetNow();
+    box.nextAttemptAt = sheetNow() + LIVE_FEED_POLL_MS;
+    box.backoffMs = BACKOFF_START_MS;
+    return failed;
+  }
+}
+
+export async function loadDashboardFeeds(): Promise<DashboardPayload> {
+  const box = dashboardStore();
+  const now = sheetNow();
+  if (box.payload && now < box.nextAttemptAt) return box.payload;
+  if (box.inFlight) return box.inFlight;
+
+  let settle!: {
+    resolve: (value: DashboardPayload) => void;
+    reject: (error: unknown) => void;
   };
-  cacheGlobal.__areg_sheet_cache__ = { ...payload, at: Date.now() };
-  return payload;
+  const run = new Promise<DashboardPayload>((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  box.inFlight = run;
+  void refreshDashboard()
+    .then((payload) => settle.resolve(payload))
+    .catch((error: unknown) => settle.reject(error))
+    .finally(() => {
+      if (box.inFlight === run) box.inFlight = null;
+    });
+  return run;
 }
 
 function idTail(id: string): string | null {
@@ -417,7 +506,8 @@ export async function debugOpenHouse(): Promise<Record<string, unknown>> {
     serviceAccountError =
       error instanceof Error ? error.message : "The service account JSON could not be read.";
   }
-  const cached = cacheGlobal.__areg_sheet_cache__;
+  const payload = await loadDashboardFeeds();
+  const box = dashboardStore();
   const base: Record<string, unknown> = {
     openHouseSheetIdSet: Boolean(openId),
     opsSheetIdSet: Boolean(opsId),
@@ -428,10 +518,11 @@ export async function debugOpenHouse(): Promise<Record<string, unknown>> {
     opsSheetIdTail: idTail(opsId),
     serviceAccountConfigured,
     serviceAccountError,
-    cacheBypassed: true,
-    cachedOpenHouseRowCount: cached?.feeds.openHouse.rows.length ?? null,
-    cachedOpenHouseError: cached?.openHouseError ?? null,
-    cachedAgeMs: cached ? Date.now() - cached.at : null,
+    cacheBypassed: false,
+    cachedOpenHouseRowCount: payload.feeds.openHouse.rows.length,
+    cachedOpenHouseError: payload.openHouseError,
+    cachedAgeMs: box.fetchedAt ? sheetNow() - box.fetchedAt : null,
+    sheetReadsLastMinute: sheetReadsSince(sheetNow() - 60_000),
   };
   if (!openId) {
     return {
@@ -458,7 +549,7 @@ export async function debugOpenHouse(): Promise<Record<string, unknown>> {
         error: unmappedRowError("the public sheet", stats),
       };
     }
-    const tabs = await readSpreadsheet(openId);
+    const tabs = await readNamedTabs(openId, [{ title: FORM_RESPONSES_TAB }]);
     const tab = formResponsesTab(tabs);
     if (!tab) {
       return {
