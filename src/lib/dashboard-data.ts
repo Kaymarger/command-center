@@ -83,7 +83,8 @@ export type OpsCardKey =
   | "docusignDrafts"
   | "subjectRemovals"
   | "completionDates"
-  | "todos";
+  | "todos"
+  | "googleBusiness";
 
 export type SheetCellRef = {
   spreadsheet: "ops" | "transactions";
@@ -109,6 +110,10 @@ export type OpsCardItem = {
   draftId?: string;
   /** True once a send has been queued. */
   busy?: boolean;
+  /** Bot named on the sheet row, when a Send or Delete should be queued there. */
+  bot?: string;
+  /** ISO time used to sort email drafts. */
+  createdAt?: string;
 };
 
 export type CincCount = { label: string; value: number };
@@ -132,6 +137,7 @@ export function emptyOpsCards(): OpsCards {
     subjectRemovals: [],
     completionDates: [],
     todos: [],
+    googleBusiness: [],
   };
 }
 
@@ -155,6 +161,10 @@ export type LiveFeeds = {
   outstandingEmails: OutstandingEmail[];
   opsCards: OpsCards;
   opsCardNotes: Partial<Record<OpsCardKey, string>>;
+  /** Plain-English note for the CINC card when the tab is empty or unreadable. */
+  cincNote?: string;
+  /** Email drafts read from an EmailDrafts tab, newest first. */
+  sheetEmailDrafts?: OpsCardItem[];
 };
 
 export const AREG_OPS_SHEET_ID = process.env.AREG_OPS_SHEET_ID?.trim() ?? "";
@@ -188,6 +198,8 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
     outstandingEmails: [],
     opsCards: emptyOpsCards(),
     opsCardNotes: {},
+    cincNote: "",
+    sheetEmailDrafts: [],
   };
 }
 

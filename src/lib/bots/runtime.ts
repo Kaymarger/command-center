@@ -501,7 +501,12 @@ async function completeTransactionJob(
   const details = input.detailsValue?.trim();
   const delivery = input.deliveryMode ?? "draft";
 
-  if (input.actionId === "send-gmail-draft" || input.actionId === "send-email-draft") {
+  if (
+    input.actionId === "send-gmail-draft" ||
+    input.actionId === "send-email-draft" ||
+    input.actionId === "send-docusign-draft" ||
+    input.actionId === "delete-docusign-draft"
+  ) {
     return {
       result: sentToComplete("transaction", input.summary),
       artifacts: [],
@@ -781,7 +786,12 @@ export async function dispatchToBot(
     ensureFeedLoop();
     await reloadFeedsFromDisk();
 
-    if (input.actionId === "send-gmail-draft" || input.actionId === "send-email-draft") {
+    if (
+      input.actionId === "send-gmail-draft" ||
+      input.actionId === "send-email-draft" ||
+      input.actionId === "send-docusign-draft" ||
+      input.actionId === "delete-docusign-draft"
+    ) {
       job = { ...job, result: sentToComplete(input.bot, input.summary) };
     } else if (input.bot === "work-routine" || input.actionId === "areg-chat") {
       const completed = await completeWorkRoutineJob(input, job.id);

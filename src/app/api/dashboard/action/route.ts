@@ -1,23 +1,59 @@
 import { connection, NextResponse } from "next/server";
 import { skipDraft, loadJob } from "@/lib/bot-store";
 import { dispatchToBot, signalExistingJob } from "@/lib/bots/runtime";
-import { opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
-import { FIRM_TODO_TAB, OPS_CARD_TABS } from "@/lib/ops-card-rows";
+import { calendarDateFromCell, calendarToday } from "@/lib/dashboard-text";
+import { appendSheetRow, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
+import type { BotTarget } from "@/lib/ops-actions";
+import {
+  botIdFromSheet,
+  EMAIL_DRAFTS_TAB,
+  FIRM_TODO_TAB,
+  OPS_CARD_TABS,
+  sheetTabMatches,
+  todoSentenceFromSheet,
+} from "@/lib/ops-card-rows";
 import { requireUserSession } from "@/lib/ops-guard";
-import { patchCachedOpsItem } from "@/lib/sheet-sync";
+import { appendCachedOpsItem, cachedTodoColumns, cachedTodoTabTitle, patchCachedOpsItem } from "@/lib/sheet-sync";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 const TODO_TAB = OPS_CARD_TABS.todos.tab;
 const EMAIL_TAB = OPS_CARD_TABS.outstandingEmails.tab;
+const DOCUSIGN_TAB = OPS_CARD_TABS.docusignDrafts.tab;
+
+function knownBot(value: string): BotTarget | null {
+  const id = botIdFromSheet(value) || value.trim().toLowerCase();
+  if (id === "transaction" || id === "listings" || id === "manager" || id === "work-routine") return id;
+  return null;
+}
 
 function allowedValue(spreadsheet: string, tab: string, value: string): boolean {
-  if (spreadsheet === "ops" && tab === TODO_TAB && value === "skipped") return true;
-  if (spreadsheet === "ops" && tab === EMAIL_TAB && (value === "skipped" || value === "sending")) {
+  if (spreadsheet === "ops" && sheetTabMatches(tab, TODO_TAB) && value === "skipped") return true;
+  if (
+    spreadsheet === "ops" &&
+    sheetTabMatches(tab, EMAIL_TAB) &&
+    (value === "skipped" || value === "sending")
+  ) {
     return true;
   }
-  if (spreadsheet === "transactions" && tab === FIRM_TODO_TAB && value === "n/a") return true;
+  if (
+    spreadsheet === "ops" &&
+    sheetTabMatches(tab, DOCUSIGN_TAB) &&
+    (value === "sent" || value === "deleted")
+  ) {
+    return true;
+  }
+  if (
+    spreadsheet === "ops" &&
+    sheetTabMatches(tab, EMAIL_DRAFTS_TAB) &&
+    (value === "sent" || value === "skipped")
+  ) {
+    return true;
+  }
+  if (spreadsheet === "transactions" && sheetTabMatches(tab, FIRM_TODO_TAB) && value === "n/a") {
+    return true;
+  }
   return false;
 }
 
@@ -71,6 +107,15 @@ export async function POST(request: Request) {
     emailType?: string;
     jobId?: string;
     command?: string;
+    dueDate?: string;
+    item?: string;
+    ownerBot?: string;
+    bot?: string;
+    text?: string;
+    detail?: string;
+    subject?: string;
+    to?: string;
+    bodyText?: string;
   } | null;
 
   if (!body?.type) {
@@ -126,6 +171,131 @@ export async function POST(request: Request) {
       if (!body.jobId) throw new Error("That draft is not on this dashboard.");
       const job = await skipDraft(body.jobId);
       if (!job) throw new Error("That draft is not on this dashboard.");
+      return NextResponse.json({ ok: true });
+    }
+
+    if (body.type === "docusign-send" || body.type === "docusign-delete") {
+      const deleting = body.type === "docusign-delete";
+      const bot = knownBot(String(body.bot ?? ""));
+      if (!bot) throw new Error("This draft has no bot in the bot column, so nothing was queued.");
+      const label = String(body.text ?? "DocuSign draft").trim() || "DocuSign draft";
+      const job = await dispatchToBot({
+        actionId: deleting ? "delete-docusign-draft" : "send-docusign-draft",
+        actionLabel: deleting ? "Delete DocuSign draft" : "Send DocuSign draft",
+        bot,
+        summary: `${deleting ? "Delete" : "Send"} this DocuSign draft: ${label}.`,
+        primaryValue: label,
+        secondaryValue: String(body.address ?? ""),
+        detailsValue: String(body.detail ?? ""),
+        deliveryMode: "send",
+      });
+      if (job.status === "error") {
+        return NextResponse.json(
+          { ok: false, error: job.result ?? "The bot did not get this DocuSign action." },
+          { status: 502 },
+        );
+      }
+      await writeCell({
+        spreadsheet: "ops",
+        tab: String(body.tab ?? DOCUSIGN_TAB),
+        row: body.row,
+        column: body.column,
+        value: deleting ? "deleted" : "sent",
+      });
+      if (body.itemId) patchCachedOpsItem(body.itemId, null);
+      return NextResponse.json({ ok: true, job });
+    }
+
+    if (body.type === "sheet-draft-skip") {
+      await writeCell({
+        spreadsheet: "ops",
+        tab: String(body.tab ?? EMAIL_DRAFTS_TAB),
+        row: body.row,
+        column: body.column,
+        value: "skipped",
+      });
+      if (body.itemId) patchCachedOpsItem(body.itemId, null);
+      return NextResponse.json({ ok: true });
+    }
+
+    if (body.type === "sheet-draft-send") {
+      const bot = knownBot(String(body.bot ?? ""));
+      if (!bot) throw new Error("This draft has no bot in the bot column, so nothing was sent.");
+      const subject = String(body.subject ?? body.text ?? "Email draft").trim();
+      const to = String(body.to ?? "");
+      const job = await dispatchToBot({
+        actionId: "send-email-draft",
+        actionLabel: "Send email draft",
+        bot,
+        summary: `Send this email draft. To: ${to}. Subject: ${subject}.`,
+        primaryValue: subject,
+        secondaryValue: to,
+        detailsValue: String(body.bodyText ?? body.detail ?? ""),
+        deliveryMode: "send",
+      });
+      if (job.status === "error") {
+        return NextResponse.json(
+          { ok: false, error: job.result ?? "The bot did not get this send." },
+          { status: 502 },
+        );
+      }
+      await writeCell({
+        spreadsheet: "ops",
+        tab: String(body.tab ?? EMAIL_DRAFTS_TAB),
+        row: body.row,
+        column: body.column,
+        value: "sent",
+      });
+      if (body.itemId) patchCachedOpsItem(body.itemId, null);
+      return NextResponse.json({ ok: true, job });
+    }
+
+    if (body.type === "add-todo") {
+      const itemText = String(body.item ?? "").trim();
+      if (!itemText) throw new Error("Write the to-do before adding it.");
+      const dueDate = String(body.dueDate ?? "").trim();
+      const address = String(body.address ?? "").trim();
+      const owner = String(body.ownerBot ?? "").trim();
+      if (owner && !knownBot(owner)) {
+        throw new Error("Pick Transaction, Listings, Manager, or Work Routine as the owner, or leave it blank.");
+      }
+      const sheetId = opsSheetId();
+      if (!sheetId) throw new Error("AREG_OPS_SHEET_ID is not set, so the to-do was not added.");
+      const columns = cachedTodoColumns() ?? {
+        due_date: 0,
+        item: 1,
+        address: 2,
+        owner_bot: 3,
+        status: 4,
+      };
+      const width = Math.max(5, ...Object.values(columns).map((index) => index + 1));
+      const row = Array.from({ length: width }, () => "");
+      const put = (key: string, value: string) => {
+        const index = columns[key];
+        if (index == null || index < 0 || index >= row.length) return;
+        row[index] = value;
+      };
+      put("due_date", dueDate);
+      put("item", itemText);
+      put("address", address);
+      put("owner_bot", owner);
+      put("status", "open");
+      const todoTab = cachedTodoTabTitle();
+      const appended = await appendSheetRow(sheetId, todoTab, row);
+      const today = calendarToday();
+      const due = dueDate ? calendarDateFromCell(dueDate, today.year) : null;
+      const text = todoSentenceFromSheet(itemText, address, due);
+      const statusColumn = columns.status ?? 4;
+      appendCachedOpsItem("todos", {
+        id: `todo-new-${Date.now()}`,
+        text,
+        detail: text,
+        skipValue: "skipped",
+        sheet:
+          appended.row == null
+            ? undefined
+            : { spreadsheet: "ops", tab: todoTab, row: appended.row, column: statusColumn },
+      });
       return NextResponse.json({ ok: true });
     }
 

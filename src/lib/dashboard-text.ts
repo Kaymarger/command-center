@@ -60,6 +60,23 @@ export function firstCalendarDate(text: string, fallbackYear: number): CalendarD
   return parseCalendarDates(text, fallbackYear)[0] ?? null;
 }
 
+/** Google sometimes stores an unformatted date as a day count since 1899-12-30. */
+export function sheetsSerialDate(value: string): CalendarDay | null {
+  if (!/^\d{5}$/.test(value.trim())) return null;
+  const serial = Number(value.trim());
+  if (serial < 20000 || serial > 80000) return null;
+  const utc = new Date(Date.UTC(1899, 11, 30) + serial * 86_400_000);
+  return {
+    year: utc.getUTCFullYear(),
+    month: utc.getUTCMonth() + 1,
+    day: utc.getUTCDate(),
+  };
+}
+
+export function calendarDateFromCell(text: string, fallbackYear: number): CalendarDay | null {
+  return firstCalendarDate(text, fallbackYear) ?? sheetsSerialDate(text);
+}
+
 /** Next month-and-day on or after today. The year in the sheet is the original year. */
 export function nextAnnualDate(
   month: number,
@@ -140,8 +157,11 @@ function withYear(month: number, day: number, year: string | undefined, fallback
 
 /** Every calendar date mentioned in a freeform line. */
 export function parseCalendarDates(text: string, fallbackYear: number): CalendarDay[] {
+  const source = text.replace(/(\d)(st|nd|rd|th)\b/gi, (_, digit: string, suffix: string) =>
+    digit + " ".repeat(suffix.length),
+  );
   const found: CalendarDay[] = [];
-  const taken: boolean[] = Array.from({ length: text.length }, () => false);
+  const taken: boolean[] = Array.from({ length: source.length }, () => false);
 
   function occupied(start: number, end: number): boolean {
     return taken.slice(start, end).some(Boolean);
@@ -156,7 +176,7 @@ export function parseCalendarDates(text: string, fallbackYear: number): Calendar
   }
 
   const iso = new RegExp("\\b(\\d{4})-(\\d{1,2})-(\\d{1,2})\\b", "g");
-  for (const match of text.matchAll(iso)) {
+  for (const match of source.matchAll(iso)) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
     if (occupied(start, end)) continue;
@@ -168,7 +188,7 @@ export function parseCalendarDates(text: string, fallbackYear: number): Calendar
     `\\b(?:(${MONTH_PATTERN})\\.?\\s+(\\d{1,2})(?:\\s*[-–]\\s*(\\d{1,2}))?(?:,?\\s*(\\d{4}))?|(\\d{1,2})(?:\\s*[-–]\\s*(\\d{1,2}))?\\s+(${MONTH_PATTERN})\\.?(?:,?\\s*(\\d{4}))?)`,
     "gi",
   );
-  for (const match of text.matchAll(named)) {
+  for (const match of source.matchAll(named)) {
     const start = match.index ?? 0;
     const end = start + match[0].length;
     if (occupied(start, end)) continue;
@@ -184,8 +204,21 @@ export function parseCalendarDates(text: string, fallbackYear: number): Calendar
     occupy(start, end);
   }
 
+  const hyphenMonth = new RegExp(
+    `\\b(?:(${MONTH_PATTERN})-(\\d{1,2})|(\\d{1,2})-(${MONTH_PATTERN}))\\b`,
+    "gi",
+  );
+  for (const match of source.matchAll(hyphenMonth)) {
+    const start = match.index ?? 0;
+    const end = start + match[0].length;
+    if (occupied(start, end)) continue;
+    if (match[1]) keep(withYear(monthNumber(match[1]), Number(match[2]), undefined, fallbackYear));
+    else if (match[4]) keep(withYear(monthNumber(match[4]), Number(match[3]), undefined, fallbackYear));
+    occupy(start, end);
+  }
+
   const numeric = /\b(\d{1,2})[\/\-.](\d{1,2})(?:[\/\-.](\d{2,4}))?\b/g;
-  for (const match of text.matchAll(numeric)) {
+  for (const match of source.matchAll(numeric)) {
     const first = Number(match[1]);
     const second = Number(match[2]);
     let month = first;
@@ -326,14 +359,63 @@ function stripParsedDate(line: string, years: number[]): string {
     .trim();
 }
 
+function hasExplicitYear(line: string): boolean {
+  return /\b(?:19|20)\d{2}\b/.test(line);
+}
+
+/** The date this note should show, or null when it is already past. */
+export function upcomingNoteDate(raw: string, today = calendarToday()): CalendarDay | null {
+  const line = raw.replace(/^[-*•]+\s*/, "").replace(/^\d+[.)]\s*/, "").trim();
+  if (!line) return null;
+  const dates = parseCalendarDates(line, today.year);
+  const day = dates.length ? dates.reduce((soonest, item) => (dayNumber(item) < dayNumber(soonest) ? item : soonest)) : null;
+  if (!day) return null;
+  if (!hasExplicitYear(line)) return nextAnnualDate(day.month, day.day, today);
+  return compareCalendarDays(day, today) < 0 ? null : day;
+}
+
 /** "Oct 21 listing expires" → "Wednesday, October 21, 2026 — Listing expires". */
 export function importantDateLine(raw: string, today = calendarToday()): string {
   const line = raw.replace(/^[-*•]+\s*/, "").replace(/^\d+[.)]\s*/, "").trim();
   if (!line) return "";
   const dates = parseCalendarDates(line, today.year);
-  const day = latestDay(dates);
+  const day = upcomingNoteDate(line, today) ?? latestDay(dates);
   if (!day) return capitalize(line);
   const note = stripParsedDate(line, dates.map((item) => item.year));
   const formatted = formatLongDate(day);
   return note ? `${formatted} — ${capitalize(note)}` : formatted;
+}
+
+export type ImportantDateGroup = { label: string; notes: string[] };
+
+/** Soonest date first, one group per day, past dates left out. */
+export function importantDateGroups(raw: string, today = calendarToday()): ImportantDateGroup[] {
+  const dated: { day: CalendarDay; note: string }[] = [];
+  const undated: string[] = [];
+  raw
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .forEach((line) => {
+      const dates = parseCalendarDates(line, today.year);
+      const day = upcomingNoteDate(line, today);
+      if (dates.length && !day) return;
+      if (!day) {
+        undated.push(capitalize(line.replace(/^[-*•]+\s*/, "").replace(/^\d+[.)]\s*/, "").trim()));
+        return;
+      }
+      const note = stripParsedDate(line, dates.map((item) => item.year));
+      dated.push({ day, note: capitalize(note || line) });
+    });
+  dated.sort((a, b) => compareCalendarDays(a.day, b.day));
+  const groups: ImportantDateGroup[] = [];
+  dated.forEach((entry) => {
+    const label = formatLongDate(entry.day);
+    const last = groups[groups.length - 1];
+    if (last?.label === label) last.notes.push(entry.note);
+    else groups.push({ label, notes: [entry.note] });
+  });
+  if (undated.length) groups.push({ label: "No date", notes: undated });
+  return groups;
 }

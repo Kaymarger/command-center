@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, Mail } from "lucide-react";
 import { artifactKindLabel, type BotArtifact } from "@/lib/artifacts";
@@ -152,6 +152,7 @@ function OpsSheetCard({
   live,
   botId,
   comingUp,
+  extra,
   expandedId,
   onToggle,
   hidden,
@@ -165,6 +166,7 @@ function OpsSheetCard({
   live?: boolean;
   botId?: BotId;
   comingUp?: boolean;
+  extra?: ReactNode;
   expandedId: string | null;
   onToggle: (id: string) => void;
   hidden: Set<string>;
@@ -177,6 +179,7 @@ function OpsSheetCard({
   const showEmpty = due.length === 0 && upcoming.length === 0 && !note;
   return (
     <Tile title={title} live={live} botId={botId}>
+      {extra}
       {note ? <div className="mb-1"><SheetProblem message={note} /></div> : null}
       {showEmpty ? <EmptyTile message={empty} /> : null}
       {due.length > 0 ? (
@@ -319,17 +322,48 @@ export function OpsDashboard() {
   const [jobOverride, setJobOverride] = useState<Record<string, BotJob>>({});
   const [queuedDrafts, setQueuedDrafts] = useState<Set<string>>(() => new Set());
   const [sendingIds, setSendingIds] = useState<Set<string>>(() => new Set());
+  const [addingTodo, setAddingTodo] = useState(false);
+  const [todoDraft, setTodoDraft] = useState({
+    dueDate: "",
+    item: "",
+    address: "",
+    ownerBot: "",
+  });
   const recentJobs = jobs.slice(0, 8).map((job) => {
     const override = jobOverride[job.id];
     if (override && override.updatedAt >= job.updatedAt) return override;
     return job;
   });
-  const emailDrafts = [...drafts]
-    .sort(
-      (a, b) =>
-        Date.parse(b.createdAt || b.updatedAt || "") -
-        Date.parse(a.createdAt || a.updatedAt || ""),
-    )
+  const sheetDrafts = feeds.sheetEmailDrafts ?? [];
+  const emailDraftLines = [
+    ...drafts.map((job) => ({
+      id: job.id,
+      kind: "job" as const,
+      text: job.draftEmail?.subject || "Email draft",
+      detail: [job.draftEmail?.to ? `To ${job.draftEmail.to}` : "", job.draftEmail?.body ?? ""]
+        .filter(Boolean)
+        .join("\n"),
+      createdAt: job.createdAt || job.updatedAt || "",
+      dedupe: `${(job.draftEmail?.subject || "").trim().toLowerCase()}|${(job.draftEmail?.to || "").trim().toLowerCase()}`,
+      job,
+      sheet: undefined as OpsCardItem | undefined,
+    })),
+    ...sheetDrafts.map((item) => ({
+      id: item.id,
+      kind: "sheet" as const,
+      text: item.text || "Email draft",
+      detail: item.detail || item.text,
+      createdAt: item.createdAt || "",
+      dedupe: `${item.text.trim().toLowerCase()}|${(item.detail?.match(/^To\s+([^\n]+)/)?.[1] ?? "").trim().toLowerCase()}`,
+      job: undefined as BotJob | undefined,
+      sheet: item,
+    })),
+  ]
+    .sort((a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || ""))
+    .filter((line, index, all) => {
+      if (!line.dedupe || line.dedupe === "|") return true;
+      return all.findIndex((other) => other.dedupe === line.dedupe) === index;
+    })
     .slice(0, 10);
   const socialQueue = artifacts
     .filter((a) => a.kind === "social" || a.kind === "feature-sheet")
@@ -421,6 +455,68 @@ export function OpsDashboard() {
     if (!window.confirm(`Send “${subject}” through the ${botLabel(job.bot)}?`)) return;
     const data = await postAction(job.id, { type: "draft-send", jobId: job.id });
     if (data) setQueuedDrafts((current) => new Set(current).add(job.id));
+  }
+
+  async function sendSheetDraft(item: OpsCardItem) {
+    const botName = item.bot ? botLabel(item.bot as BotJob["bot"]) : "its bot";
+    if (!window.confirm(`Send “${item.text}” through the ${botName}?`)) return;
+    const to = item.detail?.match(/^To\s+([^\n]+)/)?.[1]?.trim() ?? "";
+    const data = await postAction(item.id, {
+      type: "sheet-draft-send",
+      itemId: item.id,
+      bot: item.bot ?? "",
+      subject: item.text,
+      to,
+      bodyText: item.detail ?? "",
+      tab: item.sheet?.tab,
+      row: item.sheet?.row,
+      column: item.sheet?.column,
+    });
+    if (data) setHiddenIds((current) => new Set(current).add(item.id));
+  }
+
+  async function skipSheetDraft(item: OpsCardItem) {
+    if (!item.sheet) return;
+    const data = await postAction(item.id, {
+      type: "sheet-draft-skip",
+      itemId: item.id,
+      tab: item.sheet.tab,
+      row: item.sheet.row,
+      column: item.sheet.column,
+    });
+    if (data) setHiddenIds((current) => new Set(current).add(item.id));
+  }
+
+  async function queueDocusign(item: OpsCardItem, command: "send" | "delete") {
+    const verb = command === "send" ? "Send" : "Delete";
+    if (!window.confirm(`${verb} “${item.text}”?`)) return;
+    const data = await postAction(item.id, {
+      type: command === "send" ? "docusign-send" : "docusign-delete",
+      itemId: item.id,
+      bot: item.bot ?? "",
+      text: item.text,
+      address: item.detail ?? "",
+      detail: item.detail ?? "",
+      tab: item.sheet?.tab,
+      row: item.sheet?.row,
+      column: item.sheet?.column,
+    });
+    if (data) setHiddenIds((current) => new Set(current).add(item.id));
+  }
+
+  async function addTodo(event: FormEvent) {
+    event.preventDefault();
+    const data = await postAction("add-todo", {
+      type: "add-todo",
+      dueDate: todoDraft.dueDate,
+      item: todoDraft.item,
+      address: todoDraft.address,
+      ownerBot: todoDraft.ownerBot,
+    });
+    if (data) {
+      setTodoDraft({ dueDate: "", item: "", address: "", ownerBot: "" });
+      setAddingTodo(false);
+    }
   }
 
   return (
@@ -534,6 +630,66 @@ export function OpsDashboard() {
           onToggle={toggle}
           hidden={hiddenIds}
           errors={actionError}
+          extra={
+            addingTodo ? (
+              <form className="mb-1 grid gap-1" onSubmit={(event) => void addTodo(event)}>
+                <input
+                  type="date"
+                  value={todoDraft.dueDate}
+                  onChange={(event) => setTodoDraft((current) => ({ ...current, dueDate: event.target.value }))}
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Due date"
+                />
+                <input
+                  value={todoDraft.item}
+                  onChange={(event) => setTodoDraft((current) => ({ ...current, item: event.target.value }))}
+                  placeholder="To-do"
+                  required
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="To-do"
+                />
+                <input
+                  value={todoDraft.address}
+                  onChange={(event) => setTodoDraft((current) => ({ ...current, address: event.target.value }))}
+                  placeholder="Address"
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Address"
+                />
+                <select
+                  value={todoDraft.ownerBot}
+                  onChange={(event) => setTodoDraft((current) => ({ ...current, ownerBot: event.target.value }))}
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Owner bot"
+                >
+                  <option value="">Owner bot</option>
+                  <option value="transaction">Transaction</option>
+                  <option value="listings">Listings</option>
+                  <option value="manager">Manager</option>
+                  <option value="work-routine">Work Routine</option>
+                </select>
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    disabled={pendingId === "add-todo"}
+                    className="rounded border border-white/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-[#7395B8]"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddingTodo(false)}
+                    className="rounded border border-white/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-[#7395B8]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <div className="mb-1">
+                <MiniButton onClick={() => setAddingTodo(true)}>Add</MiniButton>
+              </div>
+            )
+          }
           renderActions={(item) =>
             item.sheet ? (
               <MiniButton disabled={pendingId === item.id} onClick={() => void skipSheetItem(item)}>
@@ -581,42 +737,49 @@ export function OpsDashboard() {
         />
 
         <Tile title="Email Drafts">
-          {emailDrafts.filter((item) => !hiddenIds.has(item.id)).length === 0 ? (
+          {emailDraftLines.filter((item) => !hiddenIds.has(item.id)).length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
               <Mail className="size-5 text-[#7395B8]/80" />
               <p className="text-xs text-muted-foreground">
-                Conveyancing / Generate Email drafts appear here after the bot completes them.
+                No drafts in the job list or the EmailDrafts tab.
               </p>
             </div>
           ) : (
             <ul className="grid gap-1">
-              {emailDrafts
+              {emailDraftLines
                 .filter((item) => !hiddenIds.has(item.id))
                 .map((item) => (
                   <li key={item.id}>
                     <CompactRow
-                      text={item.draftEmail?.subject || "Email draft"}
-                      detail={[
-                        item.draftEmail?.to ? `To ${item.draftEmail.to}` : "",
-                        item.draftEmail?.body ?? "",
-                      ]
-                        .filter(Boolean)
-                        .join("\n")}
+                      text={item.text}
+                      detail={item.detail}
                       expanded={expandedId === item.id}
                       onToggle={() => toggle(item.id)}
                     >
-                      {queuedDrafts.has(item.id) ? (
+                      {item.kind === "job" && item.job && queuedDrafts.has(item.id) ? (
                         <span className="text-[0.6rem] uppercase tracking-[0.08em] text-emerald-300">Queued</span>
-                      ) : (
+                      ) : item.kind === "job" && item.job ? (
                         <>
-                          <MiniButton disabled={pendingId === item.id} onClick={() => void sendDraft(item)}>
+                          <MiniButton disabled={pendingId === item.id} onClick={() => void sendDraft(item.job as BotJob)}>
                             Send
                           </MiniButton>
-                          <MiniButton disabled={pendingId === item.id} onClick={() => void skipDraft(item)}>
+                          <MiniButton disabled={pendingId === item.id} onClick={() => void skipDraft(item.job as BotJob)}>
                             Skip
                           </MiniButton>
                         </>
-                      )}
+                      ) : item.sheet ? (
+                        <>
+                          <MiniButton disabled={pendingId === item.id} onClick={() => void sendSheetDraft(item.sheet as OpsCardItem)}>
+                            Send
+                          </MiniButton>
+                          <MiniButton
+                            disabled={pendingId === item.id || !item.sheet.sheet}
+                            onClick={() => void skipSheetDraft(item.sheet as OpsCardItem)}
+                          >
+                            Skip
+                          </MiniButton>
+                        </>
+                      ) : null}
                     </CompactRow>
                     {actionError[item.id] ? (
                       <p className="px-1 pt-0.5 text-[0.65rem] text-amber-200">{actionError[item.id]}</p>
@@ -628,10 +791,19 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Marketing Queue">
-          <ArtifactList
-            items={socialQueue}
-            empty="Social Media and Feature Sheet jobs land here for the Listings Bot."
-          />
+          {socialQueue.length === 0 && (opsCards?.googleBusiness ?? []).length === 0 ? (
+            <EmptyTile message="Social Media, Feature Sheet, and Google Business jobs land here for the Listings Bot." />
+          ) : (
+            <div className="grid gap-1">
+              {socialQueue.length > 0 ? <ArtifactList items={socialQueue} empty="" /> : null}
+              <SheetLines
+                items={opsCards?.googleBusiness ?? []}
+                expandedId={expandedId}
+                onToggle={toggle}
+                hidden={hiddenIds}
+              />
+            </div>
+          )}
         </Tile>
 
         <Tile title="Important Dates">
@@ -687,7 +859,7 @@ export function OpsDashboard() {
           {cardErrors?.cinc ? (
             <SheetProblem message={cardErrors.cinc} />
           ) : cincGroups.length === 0 ? (
-            <EmptyTile message="No CINC rows in the sheet yet." />
+            <EmptyTile message={feeds.cincNote || "No data in CINC."} />
           ) : (
             <>
               <div className="mb-1 flex gap-1">
@@ -760,6 +932,17 @@ export function OpsDashboard() {
           expandedId={expandedId}
           onToggle={toggle}
           hidden={hiddenIds}
+          errors={actionError}
+          renderActions={(item) => (
+            <>
+              <MiniButton disabled={pendingId === item.id} onClick={() => void queueDocusign(item, "send")}>
+                Send
+              </MiniButton>
+              <MiniButton disabled={pendingId === item.id} onClick={() => void queueDocusign(item, "delete")}>
+                Delete
+              </MiniButton>
+            </>
+          )}
         />
 
         <OpsSheetCard

@@ -127,6 +127,8 @@ export type SheetTab = {
   reportedRange?: string;
   /** False when the JSON had no `values` array. */
   valuesKeyPresent?: boolean;
+  /** True when a metadata lookup showed this tab name is not in the file. */
+  missing?: boolean;
 };
 
 export const FORM_RESPONSES_TAB = "Form Responses 1";
@@ -163,11 +165,13 @@ export type WantedTab = { title: string; sheetId?: number };
 type ListedTab = { title: string; sheetId: number };
 type ValueCacheEntry = { at: number; tabs: SheetTab[] };
 type PlanEntry = { at: number; fetch: ListedTab[]; missing: string[] };
+type TitleCacheEntry = { at: number; tabs: ListedTab[] };
 type ReadState = {
   reads: number[];
   now: (() => number) | null;
   values: Map<string, ValueCacheEntry>;
   plans: Map<string, PlanEntry>;
+  titles: Map<string, TitleCacheEntry>;
   inflight: Map<string, Promise<unknown>>;
 };
 
@@ -179,8 +183,12 @@ function readState(): ReadState {
       now: null,
       values: new Map(),
       plans: new Map(),
+      titles: new Map(),
       inflight: new Map(),
     };
+  }
+  if (!g.__areg_sheet_reads_state__.titles) {
+    g.__areg_sheet_reads_state__.titles = new Map();
   }
   return g.__areg_sheet_reads_state__;
 }
@@ -198,6 +206,7 @@ export function resetSheetReadState() {
   state.reads = [];
   state.values.clear();
   state.plans.clear();
+  state.titles.clear();
   state.inflight.clear();
 }
 
@@ -284,8 +293,8 @@ function titleFromRange(range: string | undefined, fallback: string): string {
   return plain?.[1] ?? fallback;
 }
 
-function emptyTab(title: string, sheetId = 0): SheetTab {
-  return { title, sheetId, rows: [], valuesKeyPresent: true };
+function emptyTab(title: string, sheetId = 0, missing = false): SheetTab {
+  return { title, sheetId, rows: [], valuesKeyPresent: true, missing };
 }
 
 function dedupeWanted(wanted: WantedTab[]): WantedTab[] {
@@ -349,7 +358,12 @@ async function batchGetCached(spreadsheetId: string, tabs: ListedTab[]): Promise
 }
 
 async function listSheetProperties(spreadsheetId: string): Promise<ListedTab[]> {
+  const state = readState();
+  const hit = state.titles.get(spreadsheetId);
+  if (hit && sheetNow() - hit.at < SHEET_PLAN_TTL_MS) return hit.tabs;
   return shareInflight(`meta:${spreadsheetId}`, async () => {
+    const again = state.titles.get(spreadsheetId);
+    if (again && sheetNow() - again.at < SHEET_PLAN_TTL_MS) return again.tabs;
     const { token, email } = await accessToken();
     const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(title,sheetId)`;
     const { status, body } = await googleJson(url, token);
@@ -357,11 +371,20 @@ async function listSheetProperties(spreadsheetId: string): Promise<ListedTab[]> 
     const sheets =
       (body as { sheets?: { properties?: { title?: string; sheetId?: number } }[] }).sheets ??
       [];
-    return sheets.map((sheet) => ({
+    const tabs = sheets.map((sheet) => ({
       title: sheet.properties?.title?.trim() || "Sheet",
       sheetId: sheet.properties?.sheetId ?? 0,
     }));
+    state.titles.set(spreadsheetId, { at: sheetNow(), tabs });
+    return tabs;
   });
+}
+
+/** Tab titles only. Cached for 10 minutes so a dashboard refresh does not list them again. */
+export async function listSheetTitles(
+  spreadsheetId: string,
+): Promise<{ title: string; sheetId: number }[]> {
+  return listSheetProperties(spreadsheetId);
 }
 
 function matchListed(want: WantedTab, listed: ListedTab[]): ListedTab | undefined {
@@ -434,7 +457,7 @@ export async function readNamedTabs(
     }
     const loaded = await batchGetCached(spreadsheetId, fetch);
     state.plans.set(planKey, { at: sheetNow(), fetch, missing });
-    return [...loaded, ...missing.map((title) => emptyTab(title))];
+    return [...loaded, ...missing.map((title) => emptyTab(title, 0, true))];
   }
 }
 
@@ -481,6 +504,47 @@ export async function updateSheetCell(
   let message = detail
     ? `Google could not update ${tabTitle} (HTTP ${res.status}): ${detail}`
     : `Google could not update ${tabTitle} (HTTP ${res.status}).`;
+  if (res.status === 403) {
+    message += ` Share the sheet with ${email} as an Editor.`;
+  }
+  throw new GoogleReadError(res.status, message);
+}
+
+/**
+ * Append one row. This is a Sheets update, not a read, so it does not count toward the read quota.
+ * Values are written in the order given, starting at column A, on the next empty row.
+ */
+export async function appendSheetRow(
+  spreadsheetId: string,
+  tabTitle: string,
+  values: string[],
+): Promise<{ row: number | null }> {
+  const { token, email } = await accessToken();
+  const escaped = tabTitle.replace(/'/g, "''");
+  const range = `'${escaped}'!A1`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`;
+  const res = await fetch(url, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ values: [values] }),
+  });
+  if (res.ok) {
+    const body = (await res.json().catch(() => ({}))) as {
+      updates?: { updatedRange?: string };
+    };
+    const updated = body.updates?.updatedRange ?? "";
+    const match = updated.match(/![A-Z]+(\d+)/i);
+    return { row: match ? Number(match[1]) : null };
+  }
+  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+  const detail = body.error?.message?.trim();
+  let message = detail
+    ? `Google could not add a row to ${tabTitle} (HTTP ${res.status}): ${detail}`
+    : `Google could not add a row to ${tabTitle} (HTTP ${res.status}).`;
   if (res.status === 403) {
     message += ` Share the sheet with ${email} as an Editor.`;
   }

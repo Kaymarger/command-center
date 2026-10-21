@@ -9,21 +9,34 @@ import {
   type LiveFeeds,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
-import { currentOpenHouseRows } from "@/lib/dashboard-text";
+import { calendarToday, currentOpenHouseRows } from "@/lib/dashboard-text";
 import {
-  cincGroupsFromTable,
+  cincFromTable,
+  dateColumnPresent,
+  dealItems,
+  dealsFromDateSheet,
+  EMAIL_DRAFTS_TAB,
   findNamedTab,
   FIRM_TODO_TAB,
+  GBP_TAB,
+  GOOGLE_BUSINESS_TAB,
+  mergeKeyDeals,
+  nearbyMonthTabs,
   OPS_CARD_TABS,
   opsCardsFromTabs,
+  sheetDataRowCount,
+  sheetTabMatches,
+  SR_CLOSING_TAB,
   transactionChecklistItems,
+  type KeyDeal,
 } from "@/lib/ops-card-rows";
 import { feedsFromSheetTables } from "@/lib/feeds-io";
-import { reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
+import { awaitStoreReady, listDrafts, reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
   FORM_RESPONSES_TAB,
   formResponsesTab,
   isQuotaError,
+  listSheetTitles,
   loadServiceAccount,
   openHouseReadStats,
   openHouseRowsFromTable,
@@ -75,12 +88,37 @@ function blankCardErrors(): SheetCardErrors {
   };
 }
 
+export type TabHealth = {
+  spreadsheet: "ops" | "transactions" | "open-house";
+  tab: string;
+  found: boolean;
+  rowCount: number;
+  dataRowCount: number;
+  parsedCount: number;
+  error: string | null;
+  note: string;
+};
+
+export type DashboardHealth = {
+  checkedAt: string;
+  serviceAccountConfigured: boolean;
+  opsSheetIdSet: boolean;
+  transactionsSheetIdSet: boolean;
+  openHouseSheetIdSet: boolean;
+  tabs: TabHealth[];
+  unreadTransactionTabs: string[];
+  emailDraftJobs: number;
+};
+
 type DashboardStore = {
   payload: DashboardPayload | null;
   fetchedAt: number;
   nextAttemptAt: number;
   backoffMs: number;
   inFlight: Promise<DashboardPayload> | null;
+  health: DashboardHealth | null;
+  todoColumns: Record<string, number> | null;
+  todoTabTitle: string;
 };
 
 const BACKOFF_START_MS = 60_000;
@@ -95,6 +133,9 @@ function dashboardStore(): DashboardStore {
       nextAttemptAt: 0,
       backoffMs: BACKOFF_START_MS,
       inFlight: null,
+      health: null,
+      todoColumns: null,
+      todoTabTitle: OPS_CARD_TABS.todos.tab,
     };
   }
   return g.__areg_dashboard_cache__;
@@ -115,7 +156,26 @@ function opsWantedTabs(): WantedTab[] {
     { title: "OutstandingEmails", sheetId: sheetTabs.OutstandingEmails },
   ];
   const cards = Object.values(OPS_CARD_TABS).map((spec) => ({ title: spec.tab }));
-  return [...legacy, ...cards];
+  const extra: WantedTab[] = [
+    { title: "CINC Call History" },
+    { title: EMAIL_DRAFTS_TAB },
+    { title: "Email Drafts" },
+    { title: GOOGLE_BUSINESS_TAB },
+    { title: GBP_TAB },
+  ];
+  return [...legacy, ...cards, ...extra];
+}
+
+function bestCincTab(tabs: SheetTab[]): SheetTab | undefined {
+  const matches = tabs.filter((tab) => /cinc/i.test(tab.title) && !tab.missing);
+  const byGid = matches.find(
+    (tab) => tab.sheetId === sheetTabs.CINC && sheetDataRowCount(tab.rows) > 0,
+  );
+  if (byGid) return byGid;
+  const withRows = matches
+    .filter((tab) => sheetDataRowCount(tab.rows) > 0)
+    .sort((a, b) => sheetDataRowCount(b.rows) - sheetDataRowCount(a.rows));
+  return withRows[0] ?? matches.find((tab) => tab.sheetId === sheetTabs.CINC) ?? matches[0];
 }
 
 function pickTab(
@@ -239,6 +299,9 @@ async function opsTables(): Promise<{
 export async function syncFeedsFromGoogleSheet(): Promise<{
   feeds: LiveFeeds;
   cardErrors: SheetCardErrors;
+  tabs: SheetTab[];
+  todoColumns: Record<string, number> | null;
+  todoTabTitle: string;
 }> {
   const tables = await opsTables();
   const feeds = feedsFromSheetTables({
@@ -249,13 +312,32 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
     openHouses: tables.openHouses,
     outstandingEmails: tables.outstandingEmails,
   });
+  const today = calendarToday();
   const built = opsCardsFromTabs(tables.tabs, {
     sheetError: tables.tabs.length === 0 ? tables.cardErrors.cinc : null,
+    today,
   });
   feeds.opsCards = built.cards;
   feeds.opsCardNotes = built.notes;
-  feeds.cincGroups = cincGroupsFromTable(tables.cinc);
-  return { feeds, cardErrors: tables.cardErrors };
+  feeds.sheetEmailDrafts = built.sheetEmailDrafts;
+  const cincTab = bestCincTab(tables.tabs);
+  const cincRows = cincTab && sheetDataRowCount(cincTab.rows) > 0 ? cincTab.rows : tables.cinc;
+  const cincTitle = cincTab?.title || "CINC";
+  if (cincTab?.error || tables.cardErrors.cinc) {
+    feeds.cincGroups = [];
+    feeds.cincNote = cincTab?.error || tables.cardErrors.cinc || "";
+  } else {
+    const read = cincFromTable(cincRows, cincTitle, today);
+    feeds.cincGroups = read.groups;
+    feeds.cincNote = read.note;
+  }
+  return {
+    feeds,
+    cardErrors: tables.cardErrors,
+    tabs: tables.tabs,
+    todoColumns: built.todoColumns,
+    todoTabTitle: findNamedTab(tables.tabs, OPS_CARD_TABS.todos.tab)?.title || OPS_CARD_TABS.todos.tab,
+  };
 }
 
 export function patchCachedOpsItem(id: string, patch: Partial<OpsCardItem> | null) {
@@ -267,44 +349,191 @@ export function patchCachedOpsItem(id: string, patch: Partial<OpsCardItem> | nul
       ? cards[key].map((item) => (item.id === id ? { ...item, ...patch } : item))
       : cards[key].filter((item) => item.id !== id);
   });
+  const drafts = box.payload.feeds.sheetEmailDrafts ?? [];
+  box.payload = {
+    ...box.payload,
+    feeds: {
+      ...box.payload.feeds,
+      opsCards: cards,
+      sheetEmailDrafts: patch
+        ? drafts.map((item) => (item.id === id ? { ...item, ...patch } : item))
+        : drafts.filter((item) => item.id !== id),
+    },
+  };
+}
+
+export function appendCachedOpsItem(key: OpsCardKey, item: OpsCardItem) {
+  const box = dashboardStore();
+  if (!box.payload) return;
+  const cards = { ...box.payload.feeds.opsCards };
+  cards[key] = [...(cards[key] ?? []), item];
   box.payload = {
     ...box.payload,
     feeds: { ...box.payload.feeds, opsCards: cards },
   };
 }
 
-async function readFirmTransactionTodos(): Promise<{
-  items: LiveFeeds["opsCards"]["todos"];
+export function cachedTodoColumns(): Record<string, number> | null {
+  return dashboardStore().todoColumns;
+}
+
+export function cachedTodoTabTitle(): string {
+  return dashboardStore().todoTabTitle || OPS_CARD_TABS.todos.tab;
+}
+
+export function dashboardHealth(): DashboardHealth | null {
+  return dashboardStore().health;
+}
+
+function tabHealth(
+  spreadsheet: TabHealth["spreadsheet"],
+  tab: SheetTab | undefined,
+  fallbackTitle: string,
+  parsedCount: number,
+  note: string,
+): TabHealth {
+  const rows = tab?.rows ?? [];
+  const missing = tab?.missing === true || !tab;
+  return {
+    spreadsheet,
+    tab: tab?.title || fallbackTitle,
+    found: Boolean(tab) && !tab?.missing,
+    rowCount: rows.length,
+    dataRowCount: sheetDataRowCount(rows),
+    parsedCount,
+    error: tab?.error ?? null,
+    note: tab?.error ? tab.error : missing ? `No data in ${fallbackTitle}.` : note,
+  };
+}
+
+function srTabTitle(title: string): boolean {
+  if (/notary/i.test(title)) return false;
+  if (sheetTabMatches(title, FIRM_TODO_TAB)) return false;
+  if (sheetTabMatches(title, SR_CLOSING_TAB)) return true;
+  return /sr|subject\s*removal|closing dates/i.test(title);
+}
+
+type TransactionRead = {
+  items: OpsCardItem[];
   error: string | null;
-}> {
+  subject: KeyDeal[];
+  completion: KeyDeal[];
+  subjectNote: string;
+  health: TabHealth[];
+  unreadTitles: string[];
+};
+
+async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): Promise<TransactionRead> {
+  const empty = (error: string | null, note: string): TransactionRead => ({
+    items: [],
+    error,
+    subject: [],
+    completion: [],
+    subjectNote: note,
+    health: [
+      {
+        spreadsheet: "transactions",
+        tab: "Copy of SR & Closing Dates",
+        found: false,
+        rowCount: 0,
+        dataRowCount: 0,
+        parsedCount: 0,
+        error,
+        note,
+      },
+    ],
+    unreadTitles: [],
+  });
   const id = transactionsSheetId();
   if (!id) {
-    return {
-      items: [],
-      error:
-        "TRANSACTIONS_SHEET_ID is not set, so firm-transaction checklist items are not on this card.",
-    };
+    return empty(
+      "TRANSACTIONS_SHEET_ID is not set, so firm-transaction checklist items are not on this card.",
+      "TRANSACTIONS_SHEET_ID is not set, so subject removals are coming from KeyDates only.",
+    );
+  }
+  if (!loadServiceAccount()) {
+    return empty(
+      "Add GOOGLE_SERVICE_ACCOUNT_JSON to read the firm-transaction checklist.",
+      "No Google service account, so the transactions sheet was not read.",
+    );
   }
   try {
-    if (!loadServiceAccount()) {
-      return {
-        items: [],
-        error: "Add GOOGLE_SERVICE_ACCOUNT_JSON to read the firm-transaction checklist.",
-      };
+    const listed = await listSheetTitles(id);
+    const wanted = new Map<string, string>();
+    const take = (title: string) => {
+      const found = listed.find((tab) => sheetTabMatches(tab.title, title));
+      if (found) wanted.set(found.title.toLowerCase(), found.title);
+    };
+    take(FIRM_TODO_TAB);
+    listed.forEach((tab) => {
+      if (srTabTitle(tab.title)) take(tab.title);
+    });
+    nearbyMonthTabs(today).forEach(take);
+    const tabs = wanted.size
+      ? await readNamedTabs(id, [...wanted.values()].map((title) => ({ title })))
+      : [];
+    const firm = findNamedTab(tabs, FIRM_TODO_TAB);
+    const subjectSources = tabs.filter(
+      (tab) => !/notary/i.test(tab.title) && dateColumnPresent(tab.rows, "subject"),
+    );
+    const completionSources = tabs.filter(
+      (tab) => !/notary/i.test(tab.title) && dateColumnPresent(tab.rows, "completion"),
+    );
+    const subject = mergeKeyDeals(
+      subjectSources.map((tab) => dealsFromDateSheet(tab.rows, today, "subject", tab.title)),
+    );
+    const completion = mergeKeyDeals(
+      completionSources.map((tab) => dealsFromDateSheet(tab.rows, today, "completion", tab.title)),
+    );
+    const checkedNames = tabs.map((tab) => tab.title);
+    const subjectNote = subjectSources.length
+      ? ""
+      : `No subject-removal date column on the transactions sheet${
+          checkedNames.length ? ` (checked ${checkedNames.join(", ")})` : ""
+        }. Notary tabs are excluded. Subject removals are coming from KeyDates only.`;
+    const namedMissing = listed.some((tab) => sheetTabMatches(tab.title, SR_CLOSING_TAB))
+      ? []
+      : [
+          tabHealth("transactions", undefined, SR_CLOSING_TAB, 0, ""),
+        ];
+    if (namedMissing[0]) {
+      namedMissing[0].note =
+        "No tab with this name. That text is the file title, not a tab. Notary tabs are excluded.";
     }
-    const tabs = await readNamedTabs(id, [{ title: FIRM_TODO_TAB }]);
-    const tab = findNamedTab(tabs, FIRM_TODO_TAB);
-    if (!tab || tab.error) return { items: [], error: tab?.error ?? null };
-    return { items: transactionChecklistItems(tab.rows), error: null };
+    const health = [
+      ...namedMissing,
+      ...tabs.map((tab) => {
+        const fromTab = dealsFromDateSheet(tab.rows, today, "subject", tab.title).length;
+        const firmCount = sheetTabMatches(tab.title, FIRM_TODO_TAB)
+          ? transactionChecklistItems(tab.rows).length
+          : 0;
+        let note = "";
+        if (/notary/i.test(tab.title)) note = "Skipped. Notary rows are not subject removals.";
+        else if (!dateColumnPresent(tab.rows, "subject")) {
+          note = sheetTabMatches(tab.title, FIRM_TODO_TAB)
+            ? "Checklist only. No subject-removal date column."
+            : "No subject-removal date column.";
+        }
+        return tabHealth("transactions", tab, tab.title, fromTab + firmCount, note);
+      }),
+    ];
+    const unreadTitles = listed
+      .map((tab) => tab.title)
+      .filter((title) => !wanted.has(title.toLowerCase()));
+    return {
+      items: firm && !firm.error ? transactionChecklistItems(firm.rows) : [],
+      error: firm?.error ?? null,
+      subject,
+      completion,
+      subjectNote,
+      health,
+      unreadTitles,
+    };
   } catch (error) {
     if (isQuotaError(error)) throw error;
-    return {
-      items: [],
-      error:
-        error instanceof Error
-          ? error.message
-          : "The firm-transaction sheet could not be read.",
-    };
+    const message =
+      error instanceof Error ? error.message : "The firm-transaction sheet could not be read.";
+    return empty(message, message);
   }
 }
 
@@ -316,9 +545,9 @@ function unmappedRowError(title: string, stats: OpenHouseReadStats): string | nu
 }
 
 async function readOpenHouseForm(): Promise<
-  | { rows: ReturnType<typeof openHouseRowsFromTable> }
+  | { rows: ReturnType<typeof openHouseRowsFromTable>; title: string; rawCount: number }
   | { missing: true }
-  | { error: string }
+  | { error: string; title?: string }
 > {
   const id = openHouseSheetId();
   if (!id) return { missing: true };
@@ -327,17 +556,19 @@ async function readOpenHouseForm(): Promise<
       const table = await readPublicCsv(id, 0);
       const stats = openHouseReadStats(table);
       const unmapped = unmappedRowError("the public sheet", stats);
-      if (unmapped) return { error: unmapped };
-      return { rows: openHouseRowsFromTable(table) };
+      if (unmapped) return { error: unmapped, title: "the public sheet" };
+      return { rows: openHouseRowsFromTable(table), title: "the public sheet", rawCount: stats.nonEmptyDataRowCount };
     }
     const tabs = await readNamedTabs(id, [{ title: FORM_RESPONSES_TAB }]);
     const tab = formResponsesTab(tabs);
-    if (!tab || tab.error) return tab?.error ? { error: tab.error } : { rows: [] };
-    if (tab.rows.length === 0) return { rows: [] };
+    if (!tab || tab.error) {
+      return tab?.error ? { error: tab.error, title: tab.title } : { rows: [], title: FORM_RESPONSES_TAB, rawCount: 0 };
+    }
+    if (tab.rows.length === 0) return { rows: [], title: tab.title, rawCount: 0 };
     const stats = openHouseReadStats(tab.rows);
     const unmapped = unmappedRowError(tab.title, stats);
-    if (unmapped) return { error: unmapped };
-    return { rows: openHouseRowsFromTable(tab.rows) };
+    if (unmapped) return { error: unmapped, title: tab.title };
+    return { rows: openHouseRowsFromTable(tab.rows), title: tab.title, rawCount: stats.nonEmptyDataRowCount };
   } catch (error) {
     if (isQuotaError(error)) throw error;
     return {
@@ -380,15 +611,123 @@ function failurePayload(message: string): DashboardPayload {
   };
 }
 
+function parsedForOpsTab(title: string, feeds: LiveFeeds): number {
+  const cards = feeds.opsCards ?? emptyOpsCards();
+  if (sheetTabMatches(title, OPS_CARD_TABS.clientAnniversaries.tab)) return cards.clientAnniversaries.length;
+  if (sheetTabMatches(title, OPS_CARD_TABS.clientBirthdays.tab)) return cards.clientBirthdays.length;
+  if (/referral/i.test(title)) return cards.referralExchange.length;
+  if (/outstanding/i.test(title)) return cards.outstandingEmails.length;
+  if (/docusign/i.test(title)) return cards.docusignDrafts.length;
+  if (sheetTabMatches(title, OPS_CARD_TABS.subjectRemovals.tab)) {
+    return cards.subjectRemovals.length + cards.completionDates.length;
+  }
+  if (sheetTabMatches(title, OPS_CARD_TABS.todos.tab)) return cards.todos.length;
+  if (sheetTabMatches(title, EMAIL_DRAFTS_TAB)) return feeds.sheetEmailDrafts?.length ?? 0;
+  if (sheetTabMatches(title, GOOGLE_BUSINESS_TAB) || sheetTabMatches(title, GBP_TAB)) {
+    return cards.googleBusiness?.length ?? 0;
+  }
+  if (/cinc/i.test(title)) return feeds.cincGroups?.length ?? 0;
+  return 0;
+}
+
+async function rememberHealth(input: {
+  feeds: LiveFeeds;
+  opsTabs: SheetTab[];
+  sheetError: string | null;
+  opsNote: string | null;
+  openHouseError: string | null;
+  openHouseTitle: string;
+  openHouseRaw: number;
+  openHouseParsed: number;
+  transactions: TransactionRead;
+}) {
+  await awaitStoreReady();
+  const opsSeen = new Set<string>();
+  const opsHealth: TabHealth[] = [];
+  if (input.opsTabs.length === 0) {
+    const note = input.sheetError || input.opsNote || "No AREG Ops tabs were read.";
+    opsHealth.push({
+      spreadsheet: "ops",
+      tab: "AREG Ops",
+      found: false,
+      rowCount: 0,
+      dataRowCount: 0,
+      parsedCount: 0,
+      error: input.sheetError || input.opsNote,
+      note,
+    });
+  }
+  input.opsTabs.forEach((tab) => {
+    const key = tab.title.trim().toLowerCase();
+    if (opsSeen.has(key)) return;
+    opsSeen.add(key);
+    const dataRows = sheetDataRowCount(tab.rows);
+    const parsed = parsedForOpsTab(tab.title, input.feeds);
+    let note = "";
+    if (tab.missing || dataRows === 0) note = `No data in ${tab.title}.`;
+    else if (/cinc/i.test(tab.title) && input.feeds.cincNote && parsed === 0) note = input.feeds.cincNote;
+    else if (parsed === 0) note = `${tab.title} has ${dataRows} rows, but none matched this card.`;
+    opsHealth.push(tabHealth("ops", tab, tab.title, parsed, note));
+  });
+  const openHouseHealth: TabHealth = {
+    spreadsheet: "open-house",
+    tab: input.openHouseTitle || FORM_RESPONSES_TAB,
+    found: !input.openHouseError && input.openHouseTitle !== "",
+    rowCount: input.openHouseRaw,
+    dataRowCount: input.openHouseRaw,
+    parsedCount: input.openHouseParsed,
+    error: input.openHouseError,
+    note: input.openHouseError
+      ? input.openHouseError
+      : input.openHouseParsed === 0
+        ? `No data in ${input.openHouseTitle || FORM_RESPONSES_TAB}.`
+        : "",
+  };
+  const health: DashboardHealth = {
+    checkedAt: new Date().toISOString(),
+    serviceAccountConfigured: (() => {
+      try {
+        return Boolean(loadServiceAccount());
+      } catch {
+        return false;
+      }
+    })(),
+    opsSheetIdSet: Boolean(opsSheetId()),
+    transactionsSheetIdSet: Boolean(transactionsSheetId()),
+    openHouseSheetIdSet: Boolean(openHouseSheetId()),
+    tabs: [...opsHealth, ...input.transactions.health, openHouseHealth],
+    unreadTransactionTabs: input.transactions.unreadTitles,
+    emailDraftJobs: listDrafts().length,
+  };
+  dashboardStore().health = health;
+  console.info(
+    `[dashboard] ${health.tabs
+      .map(
+        (tab) =>
+          `${tab.spreadsheet}/${tab.tab}: rows=${tab.dataRowCount} parsed=${tab.parsedCount}${
+            tab.error ? " error" : ""
+          }${tab.note ? " note" : ""}`,
+      )
+      .join(" | ")}`,
+  );
+}
+
 async function buildPayload(): Promise<DashboardPayload> {
   let feeds = emptyFeeds();
   let sheetError: string | null = null;
   let cardErrors = blankCardErrors();
   let opsReadFailed = false;
+  let opsTabs: SheetTab[] = [];
+  let todoColumns: Record<string, number> | null = null;
+  let todoTabTitle = OPS_CARD_TABS.todos.tab;
+  const today = calendarToday();
   try {
     const synced = await syncFeedsFromGoogleSheet();
     feeds = synced.feeds;
     cardErrors = synced.cardErrors;
+    opsTabs = synced.tabs;
+    todoColumns = synced.todoColumns;
+    todoTabTitle = synced.todoTabTitle;
   } catch (error) {
     if (isQuotaError(error)) throw error;
     opsReadFailed = true;
@@ -416,16 +755,24 @@ async function buildPayload(): Promise<DashboardPayload> {
   }
 
   let openHouseError: string | null = null;
+  let openHouseTitle = FORM_RESPONSES_TAB;
+  let openHouseRaw = 0;
+  let openHouseParsed = feeds.openHouse?.rows?.length ?? 0;
   const openHouse = await readOpenHouseForm();
   if ("missing" in openHouse) {
+    openHouseTitle = "";
     if ((feeds.openHouse?.rows ?? []).length === 0) {
       openHouseError =
         "Open house sign-ups are not connected. Add OPEN_HOUSE_SHEET_ID (the spreadsheet id of the Google Form’s responses sheet) and share that sheet with the same Google service account as the dashboard.";
     }
   } else if ("error" in openHouse) {
     openHouseError = openHouse.error;
+    openHouseTitle = openHouse.title || FORM_RESPONSES_TAB;
   } else {
     const rows = currentOpenHouseRows(openHouse.rows);
+    openHouseTitle = openHouse.title;
+    openHouseRaw = openHouse.rawCount;
+    openHouseParsed = rows.length;
     feeds = {
       ...feeds,
       openHouse: {
@@ -435,21 +782,59 @@ async function buildPayload(): Promise<DashboardPayload> {
     };
   }
 
-  const firmTodos = await readFirmTransactionTodos();
-  const todoNote = [feeds.opsCardNotes?.todos, firmTodos.error].filter(Boolean).join(" ");
+  const transactions = await readTransactionsSheet(today);
+  const keyDates = findNamedTab(opsTabs, OPS_CARD_TABS.subjectRemovals.tab);
+  const subjectItems = dealItems(
+    mergeKeyDeals([
+      keyDates ? dealsFromDateSheet(keyDates.rows, today, "subject", keyDates.title) : [],
+      transactions.subject,
+    ]),
+    "subject",
+  );
+  const completionItems = dealItems(
+    mergeKeyDeals([
+      keyDates ? dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title) : [],
+      transactions.completion,
+    ]),
+    "completion",
+  );
+  const subjectNote =
+    subjectItems.length === 0
+      ? [feeds.opsCardNotes?.subjectRemovals, transactions.subjectNote].filter(Boolean).join(" ")
+      : feeds.opsCardNotes?.subjectRemovals ?? "";
+  const completionNote = feeds.opsCardNotes?.completionDates ?? "";
+  const todoNote = [feeds.opsCardNotes?.todos, transactions.error].filter(Boolean).join(" ");
   feeds = {
     ...feeds,
     opsCards: {
       ...feeds.opsCards,
-      todos: [...(feeds.opsCards?.todos ?? []), ...firmTodos.items],
+      todos: [...(feeds.opsCards?.todos ?? []), ...transactions.items],
+      subjectRemovals: subjectItems,
+      completionDates: completionItems,
     },
     opsCardNotes: {
       ...feeds.opsCardNotes,
       ...(todoNote ? { todos: todoNote } : {}),
+      ...(subjectNote ? { subjectRemovals: subjectNote } : {}),
+      ...(completionNote ? { completionDates: completionNote } : {}),
     },
   };
+  dashboardStore().todoColumns = todoColumns;
+  dashboardStore().todoTabTitle = todoTabTitle;
 
   if (!opsReadFailed) await setFeeds(feeds);
+
+  await rememberHealth({
+    feeds,
+    opsTabs,
+    sheetError,
+    opsNote: cardErrors.cinc,
+    openHouseError,
+    openHouseTitle,
+    openHouseRaw,
+    openHouseParsed,
+    transactions,
+  });
 
   return { feeds, sheetError, openHouseError, cardErrors };
 }

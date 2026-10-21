@@ -8,6 +8,7 @@ import {
 } from "@/lib/dashboard-data";
 import {
   addCalendarDays,
+  calendarDateFromCell,
   calendarToday,
   compareCalendarDays,
   firstCalendarDate,
@@ -25,7 +26,7 @@ import type { SheetTab } from "@/lib/google-sheets";
  * Firm-transaction checklist rows come from TRANSACTIONS_SHEET_ID.
  */
 export const OPS_CARD_TABS: Record<
-  OpsCardKey,
+  Exclude<OpsCardKey, "googleBusiness">,
   { tab: string; columns: readonly string[]; upcoming?: number; latest?: number }
 > = {
   clientAnniversaries: {
@@ -66,6 +67,26 @@ export const OPS_CARD_TABS: Record<
 };
 
 export const FIRM_TODO_TAB = "Firm Transactions To Dos";
+export const EMAIL_DRAFTS_TAB = "EmailDrafts";
+export const GOOGLE_BUSINESS_TAB = "Google Business Profile";
+export const GBP_TAB = "GBP";
+/** The transactions spreadsheet is titled this. A tab with the same name is read when it exists. */
+export const SR_CLOSING_TAB = "Copy of SR & Closing Dates";
+
+const NAME_HEADERS = ["name", "client", "client_name", "full_name", "person"];
+const ANNUAL_DATE_HEADERS = [
+  "date",
+  "birthday",
+  "birthdate",
+  "birth_date",
+  "anniversary",
+  "anniversary_date",
+  "move_in_date",
+  "move_in",
+];
+const ADDRESS_HEADERS = ["address", "property", "property_address", "transactions", "street"];
+const SUBJECT_DATE_HEADERS = ["subject_removal_date", "subject_removal", "sr_date", "sr", "subject"];
+const COMPLETION_DATE_HEADERS = ["completion_date", "completion", "closing_date", "closing"];
 
 const FIRM_CHECKS: { column: string; sentence: (who: string) => string }[] = [
   { column: "firm_email", sentence: (who) => `Send the firm email for ${who}.` },
@@ -168,18 +189,43 @@ function item(
   return { id, text, ...extra };
 }
 
+function annualHeaderIndex(rows: string[][]): number {
+  const found = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    const hasName = headers.some((header) => NAME_HEADERS.includes(header));
+    const hasDate = headers.some(
+      (header) => ANNUAL_DATE_HEADERS.includes(header) || /birth|annivers|move/.test(header),
+    );
+    return hasName && hasDate;
+  });
+  return found >= 0 ? found : headerIndex(rows, ["name", "date"]);
+}
+
 function annualRows(
   rows: string[][],
   today: CalendarDay,
   limit: number,
   prefix: string,
 ): OpsCardItem[] {
-  const dated = recordsFrom(rows, ["name", "date"])
+  if (!rows.length) return [];
+  const index = annualHeaderIndex(rows);
+  const headers = (rows[index] ?? []).map(normHeader);
+  const dated = rows
+    .slice(index + 1)
+    .map((row) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return record;
+    })
+    .filter((record) => Object.values(record).some(Boolean))
     .map((record) => {
-      const name = field(record, "name");
-      const parsed = firstCalendarDate(field(record, "date", "move_in_date"), today.year);
+      const name = field(record, ...NAME_HEADERS);
+      const rawDate = field(record, ...ANNUAL_DATE_HEADERS);
+      const parsed = calendarDateFromCell(rawDate, today.year);
       const upcoming = parsed ? nextAnnualDate(parsed.month, parsed.day, today) : null;
-      return { name, note: field(record, "note", "notes"), upcoming };
+      return { name, note: field(record, "note", "notes", "agent", "address"), upcoming };
     })
     .filter((row): row is { name: string; note: string; upcoming: CalendarDay } =>
       Boolean(row.name && row.upcoming),
@@ -224,7 +270,7 @@ function emailLabel(type: string): string {
   return type.trim();
 }
 
-function emailRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
+function emailRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS.outstandingEmails.tab): OpsCardItem[] {
   const horizon = addCalendarDays(today, 7);
   const located = locateRows(rows, ["address", "due_date"]);
   const open = located.items
@@ -257,22 +303,44 @@ function emailRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
       draftId: sending ? undefined : row.draftId || undefined,
       busy: sending,
       skipValue: "skipped",
-      sheet: cellRef("ops", OPS_CARD_TABS.outstandingEmails.tab, row.rowNumber, located.columns.status),
+      sheet: cellRef("ops", tabTitle, row.rowNumber, located.columns.status),
     });
   };
   return [...due.map((row) => line(row, "due")), ...upcoming.map((row) => line(row, "upcoming"))];
 }
 
-function draftRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
-  return recordsFrom(rows, ["address", "status"])
-    .map((record) => ({
+export function shortAddress(address: string): string {
+  const street = address.split(",")[0]?.trim() ?? address.trim();
+  return street
+    .replace(
+      /\s+(avenue|ave|street|st|road|rd|drive|dr|boulevard|blvd|court|ct|place|pl|crescent|cres|way|lane|ln)\.?$/i,
+      "",
+    )
+    .trim();
+}
+
+export function botIdFromSheet(value: string): string {
+  const text = value.trim().toLowerCase();
+  if (/transaction/.test(text)) return "transaction";
+  if (/listing/.test(text)) return "listings";
+  if (/manager/.test(text)) return "manager";
+  if (/work|routine/.test(text)) return "work-routine";
+  return "";
+}
+
+function draftRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS.docusignDrafts.tab): OpsCardItem[] {
+  const located = locateRows(rows, ["address", "status"]);
+  return located.items
+    .map(({ rowNumber, record }) => ({
+      rowNumber,
       address: field(record, "address"),
       type: field(record, "envelope_type"),
       signers: field(record, "signers"),
       subject: field(record, "envelope_subject"),
       requestedBy: field(record, "requested_by"),
       status: field(record, "status"),
-      created: firstCalendarDate(field(record, "created_at"), today.year),
+      bot: field(record, "bot"),
+      created: calendarDateFromCell(field(record, "created_at"), today.year),
     }))
     .filter((row) => row.address && /^draft$/i.test(row.status.trim()))
     .sort((a, b) =>
@@ -281,46 +349,152 @@ function draftRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
         a.created ?? { year: 0, month: 1, day: 1 },
       ),
     )
-    .map((row, index) => {
-      const parts = [row.address];
-      if (row.type) parts.push(row.type);
-      if (row.signers) parts.push(row.signers);
-      if (row.subject) parts.push(row.subject);
-      if (row.requestedBy) parts.push(`requested by ${row.requestedBy}`);
-      return item(`draft-${index}`, parts.join(" · "));
+    .map((row) => {
+      const type = row.type || "DocuSign";
+      const text = `${type} - ${shortAddress(row.address)}`;
+      const detail = [row.address, row.signers, row.subject, row.requestedBy ? `requested by ${row.requestedBy}` : ""]
+        .filter(Boolean)
+        .join(" · ");
+      return item(`docusign-${row.rowNumber}`, text, {
+        detail,
+        bot: botIdFromSheet(row.bot),
+        sheet: cellRef("ops", tabTitle, row.rowNumber, located.columns.status),
+      });
     });
 }
 
-function keyDateRows(
+export type KeyDeal = {
+  address: string;
+  side: string;
+  agent: string;
+  source: string;
+  date: CalendarDay;
+  possession: CalendarDay | null;
+};
+
+export function addressKey(address: string): string {
+  return address
+    .split(",")[0]
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function notaryHeader(header: string): boolean {
+  return /notary/.test(header);
+}
+
+function notaryRow(record: Record<string, string>): boolean {
+  const type = field(record, "type", "event", "category", "date_type", "kind");
+  if (/notary/i.test(type)) return true;
+  const address = field(record, ...ADDRESS_HEADERS);
+  return /notary/i.test(address);
+}
+
+function subjectHeader(header: string): boolean {
+  if (notaryHeader(header)) return false;
+  if (SUBJECT_DATE_HEADERS.includes(header)) return true;
+  if (header === "s_r" || header.startsWith("sr_") || header.startsWith("s_r_")) return true;
+  if (header.startsWith("subject")) return true;
+  return false;
+}
+
+function completionHeader(header: string): boolean {
+  if (notaryHeader(header)) return false;
+  if (COMPLETION_DATE_HEADERS.includes(header)) return true;
+  return /^(compl|closing)/.test(header) && !/email/.test(header);
+}
+
+function dateHeaderMatch(header: string, kind: "subject" | "completion"): boolean {
+  return kind === "subject" ? subjectHeader(header) : completionHeader(header);
+}
+
+function findDealHeader(
+  rows: string[][],
+  kind: "subject" | "completion",
+): { index: number; headers: string[]; dateHeader: string } | null {
+  if (!rows.length) return null;
+  for (let index = 0; index < Math.min(rows.length, 8); index += 1) {
+    const headers = (rows[index] ?? []).map(normHeader);
+    const hasAddress = headers.some((header) => ADDRESS_HEADERS.includes(header));
+    const dateHeader = headers.find((header) => dateHeaderMatch(header, kind));
+    if (hasAddress && dateHeader) return { index, headers, dateHeader };
+  }
+  return null;
+}
+
+/** True when the sheet has an address column and a non-notary date column for this card. */
+export function dateColumnPresent(rows: string[][], kind: "subject" | "completion"): boolean {
+  return findDealHeader(rows, kind) != null;
+}
+
+export function dealsFromDateSheet(
   rows: string[][],
   today: CalendarDay,
-  dateColumn: "subject_removal_date" | "completion_date",
-  prefix: string,
-): OpsCardItem[] {
-  return recordsFrom(rows, ["address", dateColumn])
+  kind: "subject" | "completion",
+  sourceLabel = "",
+): KeyDeal[] {
+  const found = findDealHeader(rows, kind);
+  if (!found) return [];
+  const { index, headers, dateHeader } = found;
+  return rows
+    .slice(index + 1)
+    .map((row) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return record;
+    })
+    .filter((record) => Object.values(record).some(Boolean) && !notaryRow(record))
     .map((record) => ({
-      address: field(record, "address"),
-      side: field(record, "side"),
-      agent: field(record, "agent"),
-      source: field(record, "source"),
-      date: firstCalendarDate(field(record, dateColumn), today.year),
-      possession: firstCalendarDate(field(record, "possession_date"), today.year),
+      address: field(record, ...ADDRESS_HEADERS),
+      side: field(record, "side", "listing_or_buyer", "listing_buyer"),
+      agent: field(record, "agent", "agent_1"),
+      source: field(record, "source") || sourceLabel,
+      date: calendarDateFromCell(record[dateHeader] ?? "", today.year),
+      possession: calendarDateFromCell(field(record, "possession_date", "possession"), today.year),
     }))
-    .filter(
-      (row): row is typeof row & { date: CalendarDay } =>
-        Boolean(row.address && row.date && compareCalendarDays(row.date, today) >= 0),
-    )
-    .sort((a, b) => compareCalendarDays(a.date, b.date))
-    .map((row, index) => {
-      const parts = [row.address];
-      if (row.side) parts.push(row.side);
-      if (row.agent) parts.push(row.agent);
-      parts.push(formatLongDate(row.date));
-      if (dateColumn === "completion_date" && row.possession) {
-        parts.push(`possession ${formatLongDate(row.possession)}`);
-      }
-      if (row.source) parts.push(row.source);
-      return item(`${prefix}-${index}`, parts.join(" · "));
+    .filter((row): row is KeyDeal => Boolean(row.address && row.date && compareCalendarDays(row.date, today) >= 0));
+}
+
+/** Keep one future date per address. The sooner date wins, and the other source stays in the line. */
+export function mergeKeyDeals(lists: KeyDeal[][]): KeyDeal[] {
+  const byAddress = new Map<string, KeyDeal>();
+  lists.flat().forEach((deal) => {
+    const key = addressKey(deal.address);
+    if (!key) return;
+    const existing = byAddress.get(key);
+    if (!existing) {
+      byAddress.set(key, deal);
+      return;
+    }
+    const sooner = compareCalendarDays(deal.date, existing.date) <= 0 ? deal : existing;
+    const later = sooner === deal ? existing : deal;
+    const sources = [...new Set([sooner.source, later.source].filter(Boolean))];
+    byAddress.set(key, {
+      ...sooner,
+      side: sooner.side || later.side,
+      agent: sooner.agent || later.agent,
+      possession: sooner.possession ?? later.possession,
+      source: sources.join(" · "),
+    });
+  });
+  return [...byAddress.values()];
+}
+
+export function dealItems(deals: KeyDeal[], kind: "subject" | "completion"): OpsCardItem[] {
+  return [...deals]
+    .sort((a, b) => compareCalendarDays(a.date, b.date) || a.address.localeCompare(b.address))
+    .map((deal) => {
+      const parts = [deal.address, deal.side, deal.agent, formatLongDate(deal.date), deal.source].filter(Boolean);
+      const text = parts.join(" · ");
+      const detail =
+        kind === "completion" && deal.possession
+          ? `${text} · possession ${formatLongDate(deal.possession)}`
+          : text;
+      return item(`${kind}-${addressKey(deal.address)}`, text, { detail });
     });
 }
 
@@ -337,7 +511,7 @@ export function todoSentenceFromSheet(
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
 }
 
-function todoRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
+function todoRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS.todos.tab): OpsCardItem[] {
   const located = locateRows(rows, ["item"]);
   return located.items
     .map(({ rowNumber, record }) => ({
@@ -359,7 +533,7 @@ function todoRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
       return item(`todo-${row.rowNumber}`, text, {
         detail: text,
         skipValue: "skipped",
-        sheet: cellRef("ops", OPS_CARD_TABS.todos.tab, row.rowNumber, located.columns.status),
+        sheet: cellRef("ops", tabTitle, row.rowNumber, located.columns.status),
       });
     })
     .filter((row) => row.text);
@@ -389,6 +563,161 @@ export function transactionChecklistItems(rows: string[][]): OpsCardItem[] {
     });
   });
   return items;
+}
+
+const MONTH_TAB_NAMES = [
+  "JANUARY",
+  "FEBRUARY",
+  "MARCH",
+  "APRIL",
+  "MAY",
+  "JUNE",
+  "JULY",
+  "AUGUST",
+  "SEPTEMBER",
+  "OCTOBER",
+  "NOVEMBER",
+  "DECEMBER",
+];
+
+/** Current month and the next month, as the transactions file names them ("OCTOBER 2026"). */
+export function nearbyMonthTabs(today: CalendarDay): string[] {
+  return [0, 1].map((offset) => {
+    const utc = new Date(Date.UTC(today.year, today.month - 1 + offset, 1));
+    return `${MONTH_TAB_NAMES[utc.getUTCMonth()]} ${utc.getUTCFullYear()}`;
+  });
+}
+
+export function sheetTabMatches(left: string, right: string): boolean {
+  return normTitle(left) === normTitle(right);
+}
+
+export function sheetDataRowCount(rows: string[][]): number {
+  const start = rows.findIndex((row) => row.some((cell) => cell.trim()));
+  if (start < 0) return 0;
+  return rows.slice(start + 1).filter((row) => row.some((cell) => cell.trim())).length;
+}
+
+function isoDay(day: CalendarDay): string {
+  const month = String(day.month).padStart(2, "0");
+  const date = String(day.day).padStart(2, "0");
+  return `${day.year}-${month}-${date}T12:00:00.000Z`;
+}
+
+const EMAIL_DRAFT_HEADERS = ["subject", "body", "email_body", "message", "draft"];
+const EMAIL_META_HEADERS = ["to", "recipient", "bot", "status", "created_at", "date", "draft_id"];
+
+function emailDraftHeaderIndex(rows: string[][]): number {
+  const found = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    const hasBody = headers.some((header) => EMAIL_DRAFT_HEADERS.includes(header));
+    const hasMeta = headers.some((header) => EMAIL_META_HEADERS.includes(header));
+    return hasBody && hasMeta;
+  });
+  return found;
+}
+
+/** Last 10 open drafts on an EmailDrafts tab, newest first. */
+export function emailDraftSheetRows(rows: string[][], today: CalendarDay, tabTitle: string): OpsCardItem[] {
+  const index = emailDraftHeaderIndex(rows);
+  if (index < 0) return [];
+  const headers = (rows[index] ?? []).map(normHeader);
+  const columns: Record<string, number> = {};
+  headers.forEach((key, column) => {
+    if (key && columns[key] == null) columns[key] = column;
+  });
+  const statusColumn = columns.status;
+  return rows
+    .slice(index + 1)
+    .map((row, offset) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return { rowNumber: index + 2 + offset, record };
+    })
+    .filter((item) => Object.values(item.record).some(Boolean))
+    .map((item) => ({
+      ...item,
+      subject: field(item.record, "subject", "email_subject"),
+      body: field(item.record, "body", "email_body", "message", "draft"),
+      to: field(item.record, "to", "recipient", "email"),
+      status: field(item.record, "status"),
+      bot: field(item.record, "bot"),
+      draftId: field(item.record, "draft_id"),
+      created: calendarDateFromCell(field(item.record, "created_at", "date", "created"), today.year),
+    }))
+    .filter((row) => (row.subject || row.body) && !closedStatus(row.status) && !/^deleted$/i.test(row.status))
+    .sort((a, b) => {
+      if (a.created && b.created) return compareCalendarDays(b.created, a.created);
+      if (a.created) return -1;
+      if (b.created) return 1;
+      return b.rowNumber - a.rowNumber;
+    })
+    .slice(0, 10)
+    .map((row) =>
+      item(`sheet-draft-${row.rowNumber}`, row.subject || "Email draft", {
+        detail: [row.to ? `To ${row.to}` : "", row.body].filter(Boolean).join("\n"),
+        bot: botIdFromSheet(row.bot),
+        draftId: row.draftId || undefined,
+        createdAt: row.created ? isoDay(row.created) : "",
+        sheet:
+          statusColumn == null ? undefined : cellRef("ops", tabTitle, row.rowNumber, statusColumn),
+      }),
+    );
+}
+
+export function todoHeaderColumns(rows: string[][]): Record<string, number> | null {
+  const located = locateRows(rows, ["item"]);
+  if (located.columns.item == null) return null;
+  return located.columns;
+}
+
+function googleBusinessRows(rows: string[][], tabTitle: string): OpsCardItem[] {
+  if (!rows.length) return [];
+  const headerAt = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    return headers.some((header) =>
+      /status|update|post|summary|message|item|address|title|notes/.test(header),
+    );
+  });
+  if (headerAt < 0) return [];
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  return rows
+    .slice(headerAt + 1)
+    .map((row, offset) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return { rowNumber: headerAt + 2 + offset, record };
+    })
+    .filter((item) => Object.values(item.record).some(Boolean))
+    .map((item) => ({
+      rowNumber: item.rowNumber,
+      status: field(item.record, "status"),
+      address: field(item.record, ...ADDRESS_HEADERS),
+      text: field(
+        item.record,
+        "update",
+        "post",
+        "summary",
+        "message",
+        "item",
+        "title",
+        "notes",
+        "note",
+      ),
+    }))
+    .filter((row) => !closedStatus(row.status) && !/^(posted|published)$/i.test(row.status.trim()))
+    .filter((row) => row.text || row.address)
+    .map((row) => {
+      const body = row.text || row.address;
+      const line = row.address && row.text ? `${body} · ${shortAddress(row.address)}` : body;
+      return item(`gbp-${tabTitle}-${row.rowNumber}`, `Google Business · ${line}`, {
+        detail: [tabTitle, row.address, row.status].filter(Boolean).join(" · "),
+      });
+    });
 }
 
 function cincPeriod(header: string): "today" | "week" | "year" | "all" | "skip" {
@@ -469,59 +798,173 @@ export function cincGroupsFromTable(rows: string[][]): CincGroup[] {
   return [...groups.values()].sort((a, b) => a.agent.localeCompare(b.agent));
 }
 
-function tabRows(
+function mondayOf(day: CalendarDay): CalendarDay {
+  const utc = new Date(Date.UTC(day.year, day.month - 1, day.day));
+  const weekday = utc.getUTCDay();
+  const delta = weekday === 0 ? 6 : weekday - 1;
+  return addCalendarDays(day, -delta);
+}
+
+function cincCallLogGroups(rows: string[][], today: CalendarDay): CincGroup[] {
+  const headerAt = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    const hasAgent = headers.some((header) => header === "agent" || header === "name" || header === "agent_name");
+    const hasDate = headers.some((header) =>
+      /^(date|call_date|called_at|timestamp|call_time|when|day)$/.test(header),
+    );
+    return hasAgent && hasDate;
+  });
+  if (headerAt < 0) return [];
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  const agentHeader =
+    headers.find((header) => header === "agent" || header === "agent_name" || header === "name") ?? "";
+  const dateHeader =
+    headers.find((header) => /^(date|call_date|called_at|timestamp|call_time|when|day)$/.test(header)) ?? "";
+  if (!agentHeader || !dateHeader) return [];
+  const weekStart = mondayOf(today);
+  const yearStart = { year: today.year, month: 1, day: 1 };
+  const groups = new Map<string, CincGroup>();
+  rows.slice(headerAt + 1).forEach((row) => {
+    const record: Record<string, string> = {};
+    headers.forEach((key, column) => {
+      if (key) record[key] = (row[column] ?? "").trim();
+    });
+    const agent = record[agentHeader] ?? "";
+    const when = calendarDateFromCell(record[dateHeader] ?? "", today.year);
+    if (!agent || /^(agent|name)$/i.test(agent) || !when) return;
+    if (compareCalendarDays(when, yearStart) < 0 || compareCalendarDays(when, today) > 0) return;
+    const group = groups.get(agent.toLowerCase()) ?? { agent, today: [], week: [], year: [] };
+    const bump = (period: "today" | "week" | "year") => {
+      const existing = group[period].find((count) => count.label === "calls");
+      if (existing) existing.value += 1;
+      else group[period].push({ label: "calls", value: 1 });
+    };
+    bump("year");
+    if (compareCalendarDays(when, weekStart) >= 0) bump("week");
+    if (compareCalendarDays(when, today) === 0) bump("today");
+    groups.set(agent.toLowerCase(), group);
+  });
+  return [...groups.values()].sort((a, b) => a.agent.localeCompare(b.agent));
+}
+
+export type CincRead = {
+  groups: CincGroup[];
+  note: string;
+  dataRows: number;
+};
+
+/** Counts when the tab has them, otherwise one call per row when the tab is a call log. */
+export function cincFromTable(rows: string[][], tabTitle: string, today: CalendarDay = calendarToday()): CincRead {
+  const title = tabTitle.trim() || "CINC";
+  const dataRows = sheetDataRowCount(rows);
+  if (!rows.length || dataRows === 0) {
+    return { groups: [], note: `No data in ${title}.`, dataRows: 0 };
+  }
+  const counted = cincGroupsFromTable(rows).filter(
+    (group) => group.today.length > 0 || group.week.length > 0 || group.year.length > 0,
+  );
+  if (counted.length) return { groups: counted, note: "", dataRows };
+  const logged = cincCallLogGroups(rows, today);
+  if (logged.length) return { groups: logged, note: "", dataRows };
+  return {
+    groups: [],
+    note: `${title} has ${dataRows} rows, but none had an agent and a count.`,
+    dataRows,
+  };
+}
+
+function loadedTab(
   tabs: SheetTab[],
   tabName: string,
   notes: Partial<Record<OpsCardKey, string>>,
   key: OpsCardKey,
-): string[][] | null {
+): SheetTab | null {
   const tab = findNamedTab(tabs, tabName);
   if (!tab) return null;
   if (tab.error) {
     notes[key] = tab.error;
     return null;
   }
-  return tab.rows;
+  return tab;
+}
+
+function unparsedAnnualNote(title: string, rows: string[][], parsed: number): string | null {
+  if (parsed > 0) return null;
+  const dataRows = sheetDataRowCount(rows);
+  if (dataRows === 0) return null;
+  return `${title} has ${dataRows} rows, but none had a name and a date.`;
 }
 
 export function opsCardsFromTabs(
   tabs: SheetTab[],
   options?: { sheetError?: string | null; today?: CalendarDay },
-): { cards: OpsCards; notes: Partial<Record<OpsCardKey, string>> } {
+): {
+  cards: OpsCards;
+  notes: Partial<Record<OpsCardKey, string>>;
+  sheetEmailDrafts: OpsCardItem[];
+  todoColumns: Record<string, number> | null;
+} {
   const notes: Partial<Record<OpsCardKey, string>> = {};
   const cards = emptyOpsCards();
   if (options?.sheetError && tabs.length === 0) {
     (Object.keys(cards) as OpsCardKey[]).forEach((key) => {
       notes[key] = options.sheetError ?? "";
     });
-    return { cards, notes };
+    return { cards, notes, sheetEmailDrafts: [], todoColumns: null };
   }
-  if (tabs.length === 0) return { cards, notes };
+  if (tabs.length === 0) return { cards, notes, sheetEmailDrafts: [], todoColumns: null };
 
   const today = options?.today ?? calendarToday();
-  const anniversaries = tabRows(tabs, OPS_CARD_TABS.clientAnniversaries.tab, notes, "clientAnniversaries");
-  const birthdays = tabRows(tabs, OPS_CARD_TABS.clientBirthdays.tab, notes, "clientBirthdays");
-  const referrals = tabRows(tabs, OPS_CARD_TABS.referralExchange.tab, notes, "referralExchange");
-  const emails = tabRows(tabs, OPS_CARD_TABS.outstandingEmails.tab, notes, "outstandingEmails");
-  const drafts = tabRows(tabs, OPS_CARD_TABS.docusignDrafts.tab, notes, "docusignDrafts");
-  const keyDates = tabRows(tabs, OPS_CARD_TABS.subjectRemovals.tab, notes, "subjectRemovals");
-  if (!keyDates && !notes.completionDates) {
-    notes.completionDates = notes.subjectRemovals;
-  }
-  const todos = tabRows(tabs, OPS_CARD_TABS.todos.tab, notes, "todos");
+  const anniversaries = loadedTab(tabs, OPS_CARD_TABS.clientAnniversaries.tab, notes, "clientAnniversaries");
+  const birthdays = loadedTab(tabs, OPS_CARD_TABS.clientBirthdays.tab, notes, "clientBirthdays");
+  const referrals = loadedTab(tabs, OPS_CARD_TABS.referralExchange.tab, notes, "referralExchange");
+  const emails = loadedTab(tabs, OPS_CARD_TABS.outstandingEmails.tab, notes, "outstandingEmails");
+  const drafts = loadedTab(tabs, OPS_CARD_TABS.docusignDrafts.tab, notes, "docusignDrafts");
+  const keyDates = loadedTab(tabs, OPS_CARD_TABS.subjectRemovals.tab, notes, "subjectRemovals");
+  if (!keyDates && !notes.completionDates) notes.completionDates = notes.subjectRemovals;
+  const todos = loadedTab(tabs, OPS_CARD_TABS.todos.tab, notes, "todos");
+  const emailDrafts = findNamedTab(tabs, EMAIL_DRAFTS_TAB);
+  const googleBusiness = findNamedTab(tabs, GOOGLE_BUSINESS_TAB);
+  const gbp = findNamedTab(tabs, GBP_TAB);
 
   if (anniversaries) {
-    cards.clientAnniversaries = annualRows(anniversaries, today, 10, "anniversary");
+    cards.clientAnniversaries = annualRows(anniversaries.rows, today, 10, "anniversary");
+    const unparsed = unparsedAnnualNote(anniversaries.title, anniversaries.rows, cards.clientAnniversaries.length);
+    if (unparsed) notes.clientAnniversaries = unparsed;
   }
-  if (birthdays) cards.clientBirthdays = annualRows(birthdays, today, 10, "birthday");
-  if (referrals) cards.referralExchange = referralRows(referrals, today);
-  if (emails) cards.outstandingEmails = emailRows(emails, today);
-  if (drafts) cards.docusignDrafts = draftRows(drafts, today);
+  if (birthdays) {
+    cards.clientBirthdays = annualRows(birthdays.rows, today, 10, "birthday");
+    const unparsed = unparsedAnnualNote(birthdays.title, birthdays.rows, cards.clientBirthdays.length);
+    if (unparsed) notes.clientBirthdays = unparsed;
+  }
+  if (referrals) cards.referralExchange = referralRows(referrals.rows, today);
+  if (emails) cards.outstandingEmails = emailRows(emails.rows, today, emails.title);
+  if (drafts) cards.docusignDrafts = draftRows(drafts.rows, today, drafts.title);
   if (keyDates) {
-    cards.subjectRemovals = keyDateRows(keyDates, today, "subject_removal_date", "subject");
-    cards.completionDates = keyDateRows(keyDates, today, "completion_date", "completion");
+    cards.subjectRemovals = dealItems(
+      dealsFromDateSheet(keyDates.rows, today, "subject", keyDates.title),
+      "subject",
+    );
+    cards.completionDates = dealItems(
+      dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title),
+      "completion",
+    );
     delete notes.completionDates;
   }
-  if (todos) cards.todos = todoRows(todos, today);
-  return { cards, notes };
+  if (todos) cards.todos = todoRows(todos.rows, today, todos.title);
+  const gbpRows = [
+    ...(googleBusiness && !googleBusiness.error ? googleBusinessRows(googleBusiness.rows, googleBusiness.title) : []),
+    ...(gbp && !gbp.error && !sheetTabMatches(gbp.title, googleBusiness?.title ?? "")
+      ? googleBusinessRows(gbp.rows, gbp.title)
+      : []),
+  ];
+  cards.googleBusiness = gbpRows;
+  const sheetEmailDrafts =
+    emailDrafts && !emailDrafts.error ? emailDraftSheetRows(emailDrafts.rows, today, emailDrafts.title) : [];
+  return {
+    cards,
+    notes,
+    sheetEmailDrafts,
+    todoColumns: todos ? todoHeaderColumns(todos.rows) : null,
+  };
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { Loader2, Sparkles } from "lucide-react";
-import { importantDateLine, todoSentence } from "@/lib/dashboard-text";
+import { importantDateGroups, todoSentence } from "@/lib/dashboard-text";
 import { organizeNotes } from "@/lib/organize-notes";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -40,18 +40,36 @@ export function DashboardNotepad({
     });
   }
 
-  const rendered = value
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => (kind === "todos" ? todoSentence(line) : importantDateLine(line)))
-    .filter(Boolean);
+  const dateGroups = kind === "dates" ? importantDateGroups(value) : [];
+  const todoLines =
+    kind === "todos"
+      ? value
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => todoSentence(line))
+          .filter(Boolean)
+      : [];
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
-      {rendered.length > 0 ? (
+      {dateGroups.length > 0 ? (
+        <ul className="grid min-h-0 flex-1 gap-1 overflow-y-auto">
+          {dateGroups.map((group) => (
+            <li key={group.label}>
+              <p className="text-[0.65rem] font-semibold text-[#7395B8]">{group.label}</p>
+              {group.notes.map((note) => (
+                <p key={note} title={note} className="truncate text-xs leading-snug text-foreground">
+                  {note}
+                </p>
+              ))}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {todoLines.length > 0 ? (
         <ul className="grid min-h-0 flex-1 gap-0.5 overflow-y-auto">
-          {rendered.map((line, index) => (
+          {todoLines.map((line, index) => (
             <li key={`${line}-${index}`} title={line} className="truncate text-xs leading-snug text-foreground">
               {line}
             </li>

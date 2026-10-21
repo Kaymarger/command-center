@@ -23,6 +23,8 @@ export async function PUT(request: Request) {
     outstandingEmails: body.outstandingEmails ?? [],
     opsCards: body.opsCards ?? emptyOpsCards(),
     opsCardNotes: body.opsCardNotes ?? {},
+    cincNote: body.cincNote ?? "",
+    sheetEmailDrafts: body.sheetEmailDrafts ?? [],
     openHouse: {
       rows: body.openHouse?.rows ?? [],
       summary:

@@ -26,6 +26,8 @@ export async function readFeedsFile(): Promise<LiveFeeds> {
       opsCards: parsed.opsCards ?? emptyOpsCards(),
       opsCardNotes: parsed.opsCardNotes ?? {},
       cincGroups: parsed.cincGroups ?? [],
+      cincNote: parsed.cincNote ?? "",
+      sheetEmailDrafts: parsed.sheetEmailDrafts ?? [],
     };
   } catch {
     return emptyFeeds("empty");
@@ -197,6 +199,8 @@ export function feedsFromSheetTables(tables: {
     outstandingEmails,
     opsCards: emptyOpsCards(),
     opsCardNotes: {},
+    cincNote: "",
+    sheetEmailDrafts: [],
   };
 }
 
@@ -226,6 +230,8 @@ export function mergeWebhookFeeds(
       patch.outstandingEmails ?? current.outstandingEmails,
     opsCards: patch.opsCards ?? current.opsCards,
     opsCardNotes: patch.opsCardNotes ?? current.opsCardNotes,
+    cincNote: patch.cincNote ?? current.cincNote,
+    sheetEmailDrafts: patch.sheetEmailDrafts ?? current.sheetEmailDrafts,
   };
   return next;
 }
