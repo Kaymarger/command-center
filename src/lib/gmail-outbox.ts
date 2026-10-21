@@ -45,9 +45,13 @@ export async function enqueueGmail(
     createdAt: now,
     updatedAt: now,
   };
-  const all = await readAll();
-  all.unshift(next);
-  await writeAll(all.slice(0, 100));
+  try {
+    const all = await readAll();
+    all.unshift(next);
+    await writeAll(all.slice(0, 100));
+  } catch {
+    // Vercel’s disk is read-only. A failed local copy must not block the webhook POST.
+  }
   return next;
 }
 

@@ -32,6 +32,7 @@ export type BotJob = {
   /** Primary: webhook POST to the bot (BOT_*_URL) */
   webhookDelivery?: {
     status: "sent" | "failed" | "not_configured";
+    httpStatus?: number;
     error?: string;
     sentAt?: string;
   };

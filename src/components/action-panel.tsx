@@ -17,6 +17,7 @@ import {
 } from "@/lib/ops-actions";
 import {
   WebhookDeliveryBadge,
+  WebhookDeliveryDetail,
   type WebhookDelivery,
 } from "@/components/webhook-delivery-badge";
 import { Button } from "@/components/ui/button";
@@ -312,6 +313,7 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
               {webhookDelivery ? (
                 <div className="mt-3 flex flex-col items-center gap-1.5">
                   <WebhookDeliveryBadge delivery={webhookDelivery} />
+                  <WebhookDeliveryDetail delivery={webhookDelivery} />
                 </div>
               ) : null}
               {sendFailed ? null : (

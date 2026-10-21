@@ -2,6 +2,7 @@ import { cn } from "@/lib/utils";
 
 export type WebhookDelivery = {
   status: "sent" | "failed" | "not_configured";
+  httpStatus?: number;
   error?: string;
   sentAt?: string;
 };
@@ -59,7 +60,9 @@ export function WebhookDeliveryDetail({
   if (delivery.status === "sent") {
     return (
       <p className="mt-1.5 text-xs text-emerald-300/90">
-        Job posted to the bot’s webhook.
+        {typeof delivery.httpStatus === "number"
+          ? `The webhook replied ${delivery.httpStatus}.`
+          : "Job posted to the bot’s webhook."}
       </p>
     );
   }

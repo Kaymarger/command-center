@@ -108,6 +108,29 @@ function webhookSettingNames(bot: BotTarget): { urlName: string; keyName: string
   return { urlName: botEnvKeys[bot], keyName: botAuthEnvKeys[bot] };
 }
 
+function clipPlain(value: string): string {
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text || text.startsWith("<")) return "";
+  return text.length > 180 ? `${text.slice(0, 177)}…` : text;
+}
+
+async function webhookReplyDetail(res: Response): Promise<string> {
+  try {
+    const text = (await res.text()).trim();
+    if (!text) return "";
+    try {
+      const parsed = JSON.parse(text) as { error?: unknown; message?: unknown };
+      const message = parsed.error ?? parsed.message;
+      if (typeof message === "string") return clipPlain(message);
+    } catch {
+      /* body is not JSON */
+    }
+    return clipPlain(text);
+  } catch {
+    return "";
+  }
+}
+
 async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
   const names = webhookSettingNames(job.bot);
   const label = botLabel(job.bot);
@@ -118,7 +141,7 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
       forwarded: false as const,
       delivery: {
         status: "not_configured" as const,
-        error: `The ${label} webhook address is missing. Add ${urlName} on the host, then send this job again.`,
+        error: `The ${label} webhook address is missing, so no request was sent. Add ${urlName} on the host, then send this job again.`,
       },
     };
   }
@@ -130,7 +153,7 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
       forwarded: false as const,
       delivery: {
         status: "not_configured" as const,
-        error: `The ${label} key is missing. Add ${names.keyName} on the host. ${names.urlName} is already set.`,
+        error: `The ${label} key is missing, so no request was sent. Add ${names.keyName} on the host. ${names.urlName} is already set.`,
       },
     };
   }
@@ -138,8 +161,11 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
   try {
     const res = await fetch(url, {
       method: "POST",
+      cache: "no-store",
+      redirect: "manual",
       headers: {
         "Content-Type": "application/json",
+        Accept: "application/json",
         Authorization: `Bearer ${authKey}`,
       },
       body: JSON.stringify({
@@ -167,12 +193,16 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
       }),
     });
 
+    const detail = await webhookReplyDetail(res);
     if (!res.ok) {
       return {
         forwarded: false as const,
         delivery: {
           status: "failed" as const,
-          error: `The ${label} did not accept this job (response ${res.status}). Check ${names.urlName} and ${names.keyName} on the host.`,
+          httpStatus: res.status,
+          error: detail
+            ? `The ${label} did not accept this job. The webhook replied ${res.status}. ${detail}`
+            : `The ${label} did not accept this job. The webhook replied ${res.status}. Check ${names.urlName} and ${names.keyName} on the host.`,
           sentAt: new Date().toISOString(),
         },
       };
@@ -182,6 +212,7 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
       forwarded: true as const,
       delivery: {
         status: "sent" as const,
+        httpStatus: res.status,
         sentAt: new Date().toISOString(),
       },
     };
@@ -190,7 +221,7 @@ async function forwardToExternalBot(job: BotJob, input: DispatchInput) {
       forwarded: false as const,
       delivery: {
         status: "failed" as const,
-        error: `The ${label} could not be reached. Check that ${names.urlName} on the host is the right webhook address.`,
+        error: `The ${label} could not be reached, so there is no HTTP status. Check that ${names.urlName} on the host is the right webhook address.`,
         sentAt: new Date().toISOString(),
       },
     };
@@ -645,12 +676,17 @@ async function completeWorkRoutineJob(
   };
 }
 
+function rememberJob(job: BotJob) {
+  try {
+    upsertJob(job);
+  } catch {
+    // A local save must not change what the webhook already did.
+  }
+}
+
 export async function dispatchToBot(
   input: DispatchInput
 ): Promise<BotJob & { composeUrl?: string }> {
-  ensureFeedLoop();
-  await reloadFeedsFromDisk();
-
   const now = new Date().toISOString();
   let job: BotJob = {
     id: createJobId(),
@@ -661,20 +697,24 @@ export async function dispatchToBot(
     optionPath: input.optionPath,
     attachmentNames: input.attachmentNames,
     secondaryValue: input.secondaryValue,
-    status: "queued",
+    status: "processing",
     createdAt: now,
     updatedAt: now,
   };
-  upsertJob(job);
 
-  job = { ...job, status: "processing", updatedAt: new Date().toISOString() };
-  upsertJob(job);
+  // The webhook POST is the send. Do it before any local draft or file write.
+  // On Vercel those writes throw (read-only disk) and used to stop the request.
+  const external =
+    job.bot === "none" ? null : await forwardToExternalBot(job, input);
+  if (external) {
+    job = { ...job, webhookDelivery: external.delivery };
+  }
 
+  let composeUrl: string | undefined;
+  let artifacts: BotArtifact[] = [];
   try {
-    await new Promise((resolve) => setTimeout(resolve, 280));
-
-    let artifacts: BotArtifact[] = [];
-    let composeUrl: string | undefined;
+    ensureFeedLoop();
+    await reloadFeedsFromDisk();
 
     if (input.bot === "work-routine" || input.actionId === "areg-chat") {
       const completed = await completeWorkRoutineJob(input, job.id);
@@ -710,46 +750,48 @@ export async function dispatchToBot(
     }
 
     for (const artifact of artifacts) addArtifact(artifact);
+  } catch {
+    // Local bookkeeping failed. The webhook result below still stands.
+  }
 
-    // Jobs go out only by webhook address plus bearer key.
-    if (job.bot !== "none") {
-      const external = await forwardToExternalBot(job, input);
-      job = { ...job, webhookDelivery: external.delivery };
-
-      if (external.forwarded) {
-        job = {
-          ...job,
-          result: `Sent to the ${botLabel(job.bot)}.`,
-        };
-      } else {
-        job = {
-          ...job,
-          result:
-            external.delivery.error ??
-            `The ${botLabel(job.bot)} did not receive this job.`,
-          status: "error",
-        };
-      }
-    }
-
+  if (external?.forwarded) {
+    const code = external.delivery.httpStatus;
+    job = {
+      ...job,
+      webhookDelivery: external.delivery,
+      status: "done",
+      result:
+        typeof code === "number"
+          ? `Sent to the ${botLabel(job.bot)}. The webhook replied ${code}.`
+          : `Sent to the ${botLabel(job.bot)}.`,
+      updatedAt: new Date().toISOString(),
+    };
+  } else if (external) {
+    job = {
+      ...job,
+      webhookDelivery: external.delivery,
+      status: "error",
+      result:
+        external.delivery.error ??
+        `The ${botLabel(job.bot)} did not receive this job. No HTTP status came back.`,
+      updatedAt: new Date().toISOString(),
+    };
+  } else {
     job = {
       ...job,
       artifactIds: artifacts.map((a) => a.id),
-      status: job.status === "error" ? "error" : "done",
+      status: "done",
       updatedAt: new Date().toISOString(),
     };
-    upsertJob(job);
-    return { ...job, composeUrl };
-  } catch (error) {
-    job = {
-      ...job,
-      status: "error",
-      result: error instanceof Error ? error.message : "Bot failed",
-      updatedAt: new Date().toISOString(),
-    };
-    upsertJob(job);
-    return job;
   }
+
+  job = {
+    ...job,
+    artifactIds: artifacts.map((a) => a.id),
+    updatedAt: new Date().toISOString(),
+  };
+  rememberJob(job);
+  return { ...job, composeUrl };
 }
 
 export function botModeLabel(bot: BotTarget): string {

@@ -1,10 +1,12 @@
-import { NextResponse } from "next/server";
+import { connection, NextResponse } from "next/server";
 import { dispatchToBot, type DispatchInput } from "@/lib/bots/runtime";
 import { requireUserSession } from "@/lib/ops-guard";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function POST(request: Request) {
+  await connection();
   const denied = await requireUserSession();
   if (denied) return denied;
 
