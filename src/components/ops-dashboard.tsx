@@ -57,6 +57,45 @@ function SheetLines({ items }: { items: OpsCardItem[] }) {
   );
 }
 
+function OpsSheetCard({
+  title,
+  items,
+  empty,
+  note,
+  live,
+  botId,
+  comingUp,
+}: {
+  title: string;
+  items: OpsCardItem[];
+  empty: string;
+  note?: string;
+  live?: boolean;
+  botId?: BotId;
+  comingUp?: boolean;
+}) {
+  const due = items.filter((item) => item.section !== "upcoming");
+  const upcoming = items.filter((item) => item.section === "upcoming");
+  const showEmpty = due.length === 0 && upcoming.length === 0 && !note;
+  return (
+    <Tile title={title} live={live} botId={botId}>
+      {note ? <div className="mb-2"><SheetProblem message={note} /></div> : null}
+      {showEmpty ? <EmptyTile message={empty} /> : null}
+      {due.length > 0 ? <SheetLines items={due} /> : null}
+      {upcoming.length > 0 ? (
+        <div className={due.length > 0 ? "mt-3" : undefined}>
+          {comingUp ? (
+            <p className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-[#7395B8]">
+              Coming up
+            </p>
+          ) : null}
+          <SheetLines items={upcoming} />
+        </div>
+      ) : null}
+    </Tile>
+  );
+}
+
 function EmptyTile({ message }: { message: string }) {
   return (
     <p className="flex h-full items-center justify-center px-2 text-center text-sm text-muted-foreground">
@@ -171,6 +210,7 @@ export function OpsDashboard() {
   }, [feeds.updatedAt]);
 
   const opsCards = feeds.opsCards;
+  const opsNotes = feeds.opsCardNotes ?? {};
 
   return (
     <div className="relative mx-auto flex w-full max-w-7xl flex-col px-4 pb-16 pt-8 sm:px-6 sm:pt-12">
@@ -347,21 +387,22 @@ export function OpsDashboard() {
           />
         </Tile>
 
-        <Tile title="To-Do's">
-          <DashboardNotepad
-            storageKey="areg-ops-todos"
-            kind="todos"
-            placeholder="Brain-dump tasks — follow up | Bennett | the listing"
-          />
-        </Tile>
+        <OpsSheetCard
+          title="To-Do's"
+          live={live}
+          items={opsCards?.todos ?? []}
+          note={opsNotes.todos}
+          empty="No open to-dos."
+        />
 
-        <Tile title="Outstanding Emails" live={live}>
-          {(opsCards?.outstandingEmails ?? []).length === 0 ? (
-            <EmptyTile message="No accepted-offer, firm, pre-completion, or review emails past their send date." />
-          ) : (
-            <SheetLines items={opsCards.outstandingEmails} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="Outstanding Emails"
+          live={live}
+          comingUp
+          items={opsCards?.outstandingEmails ?? []}
+          note={opsNotes.outstandingEmails}
+          empty="No firm, completion, review, or pre-completion emails due today or earlier."
+        />
 
         <Tile title="Open House Availability" botId="google-forms" live={live}>
           {openHouseError ? (
@@ -400,13 +441,14 @@ export function OpsDashboard() {
           )}
         </Tile>
 
-        <Tile title="Referral Exchange" botId="work-routine" live={live}>
-          {(opsCards?.referralExchange ?? []).length === 0 ? (
-            <EmptyTile message="No recent referral assignments." />
-          ) : (
-            <SheetLines items={opsCards.referralExchange} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="Referral Exchange"
+          botId="work-routine"
+          live={live}
+          items={opsCards?.referralExchange ?? []}
+          note={opsNotes.referralExchange}
+          empty="No recent referral assignments."
+        />
 
         <Tile title="CINC Call History" botId="cinc" live={live}>
           {cardErrors?.cinc ? (
@@ -482,45 +524,47 @@ export function OpsDashboard() {
           )}
         </Tile>
 
-        <Tile title="Client Anniversaries" botId="work-routine" live={live}>
-          {(opsCards?.clientAnniversaries ?? []).length === 0 ? (
-            <EmptyTile message="No upcoming anniversaries." />
-          ) : (
-            <SheetLines items={opsCards.clientAnniversaries} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="Client Anniversaries"
+          botId="work-routine"
+          live={live}
+          items={opsCards?.clientAnniversaries ?? []}
+          note={opsNotes.clientAnniversaries}
+          empty="No upcoming anniversaries."
+        />
 
-        <Tile title="Client Birthdays" botId="work-routine" live={live}>
-          {(opsCards?.clientBirthdays ?? []).length === 0 ? (
-            <EmptyTile message="No upcoming birthdays." />
-          ) : (
-            <SheetLines items={opsCards.clientBirthdays} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="Client Birthdays"
+          botId="work-routine"
+          live={live}
+          items={opsCards?.clientBirthdays ?? []}
+          note={opsNotes.clientBirthdays}
+          empty="No upcoming birthdays."
+        />
 
-        <Tile title="DocuSign Drafts" live={live}>
-          {(opsCards?.docusignDrafts ?? []).length === 0 ? (
-            <EmptyTile message="No DocuSign drafts waiting to be sent." />
-          ) : (
-            <SheetLines items={opsCards.docusignDrafts} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="DocuSign Drafts"
+          live={live}
+          items={opsCards?.docusignDrafts ?? []}
+          note={opsNotes.docusignDrafts}
+          empty="No DocuSign drafts waiting to be sent."
+        />
 
-        <Tile title="Upcoming Subject Removals" live={live}>
-          {(opsCards?.subjectRemovals ?? []).length === 0 ? (
-            <EmptyTile message="No upcoming subject removals." />
-          ) : (
-            <SheetLines items={opsCards.subjectRemovals} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="Upcoming Subject Removals"
+          live={live}
+          items={opsCards?.subjectRemovals ?? []}
+          note={opsNotes.subjectRemovals}
+          empty="No upcoming subject removals."
+        />
 
-        <Tile title="Upcoming Completion Dates" live={live}>
-          {(opsCards?.completionDates ?? []).length === 0 ? (
-            <EmptyTile message="No upcoming completion dates." />
-          ) : (
-            <SheetLines items={opsCards.completionDates} />
-          )}
-        </Tile>
+        <OpsSheetCard
+          title="Upcoming Completion Dates"
+          live={live}
+          items={opsCards?.completionDates ?? []}
+          note={opsNotes.completionDates}
+          empty="No upcoming completion dates."
+        />
       </div>
     </div>
   );

@@ -4,12 +4,16 @@ import {
   sheetTabs,
   summarizeOpenHouses,
   type LiveFeeds,
-  type OpsCardItem,
   type OpsCardKey,
-  type OpsCards,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
 import { currentOpenHouseRows } from "@/lib/dashboard-text";
+import {
+  findNamedTab,
+  FIRM_TODO_TAB,
+  opsCardsFromTabs,
+  transactionChecklistItems,
+} from "@/lib/ops-card-rows";
 import { feedsFromSheetTables } from "@/lib/feeds-io";
 import { reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
@@ -21,33 +25,12 @@ import {
   opsSheetId,
   readPublicCsv,
   readSpreadsheet,
+  transactionsSheetId,
   type OpenHouseReadStats,
   type SheetTab,
 } from "@/lib/google-sheets";
 
-/**
- * AREG Ops tabs, one per dashboard card.
- * Change `tab` here when the sheet names are confirmed.
- * `columns` stays null until the headers are confirmed, so the card stays empty
- * instead of guessing. `upcoming` / `latest` are the row limits those cards will use.
- */
-export const OPS_CARD_TABS: Record<
-  OpsCardKey,
-  {
-    tab: string;
-    columns: Record<string, string> | null;
-    upcoming?: number;
-    latest?: number;
-  }
-> = {
-  clientAnniversaries: { tab: "Anniversaries", columns: null, upcoming: 10 },
-  clientBirthdays: { tab: "Birthdays", columns: null, upcoming: 10 },
-  referralExchange: { tab: "Referrals", columns: null, latest: 6 },
-  outstandingEmails: { tab: "Outstanding Emails", columns: null },
-  docusignDrafts: { tab: "DocuSign Drafts", columns: null },
-  subjectRemovals: { tab: "Upcoming Subject Removals", columns: null },
-  completionDates: { tab: "Upcoming Completion Dates", columns: null },
-};
+export { OPS_CARD_TABS } from "@/lib/ops-card-rows";
 
 const TAB_MATCHES: {
   key: keyof typeof sheetTabs;
@@ -102,30 +85,6 @@ function pickTab(
   const match = byGid ?? byName;
   if (!match) return { rows: [], found: false, error: null };
   return { rows: match.rows, found: true, error: match.error ?? null };
-}
-
-function findOpsTab(tabs: SheetTab[], tabName: string): SheetTab | undefined {
-  const wanted = tabName.trim().toLowerCase();
-  return tabs.find((tab) => tab.title.trim().toLowerCase() === wanted);
-}
-
-/**
- * Read one configured card. With `columns` still null, filled tabs stay hidden
- * and the card shows its empty state.
- */
-export function readOpsCard(tabs: SheetTab[], key: OpsCardKey): OpsCardItem[] {
-  const config = OPS_CARD_TABS[key];
-  const tab = findOpsTab(tabs, config.tab);
-  if (config.columns == null || !tab || tab.error || tab.rows.length <= 1) return [];
-  return [];
-}
-
-export function opsCardsFromTabs(tabs: SheetTab[]): OpsCards {
-  const cards = emptyOpsCards();
-  (Object.keys(OPS_CARD_TABS) as OpsCardKey[]).forEach((key) => {
-    cards[key] = readOpsCard(tabs, key);
-  });
-  return cards;
 }
 
 function missingTabMessage(label: string, titles: string[]): string {
@@ -259,8 +218,49 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
     openHouses: tables.openHouses,
     outstandingEmails: tables.outstandingEmails,
   });
-  feeds.opsCards = opsCardsFromTabs(tables.tabs);
+  const built = opsCardsFromTabs(tables.tabs, {
+    sheetError: tables.tabs.length === 0 ? tables.cardErrors.cinc : null,
+  });
+  feeds.opsCards = built.cards;
+  feeds.opsCardNotes = built.notes;
   return { feeds, cardErrors: tables.cardErrors };
+}
+
+async function readFirmTransactionTodos(): Promise<{
+  items: LiveFeeds["opsCards"]["todos"];
+  error: string | null;
+}> {
+  const id = transactionsSheetId();
+  if (!id) {
+    return {
+      items: [],
+      error:
+        "TRANSACTIONS_SHEET_ID is not set, so firm-transaction checklist items are not on this card.",
+    };
+  }
+  try {
+    if (!loadServiceAccount()) {
+      return {
+        items: [],
+        error: "Add GOOGLE_SERVICE_ACCOUNT_JSON to read the firm-transaction checklist.",
+      };
+    }
+    const tabs = await readSpreadsheet(id);
+    const tab = findNamedTab(tabs, FIRM_TODO_TAB);
+    if (!tab) {
+      return { items: [], error: `The “${FIRM_TODO_TAB}” tab was not found.` };
+    }
+    if (tab.error) return { items: [], error: tab.error };
+    return { items: transactionChecklistItems(tab.rows), error: null };
+  } catch (error) {
+    return {
+      items: [],
+      error:
+        error instanceof Error
+          ? error.message
+          : "The firm-transaction sheet could not be read.",
+    };
+  }
 }
 
 function unmappedRowError(title: string, stats: OpenHouseReadStats): string | null {
@@ -345,6 +345,11 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
     } catch {
       feeds = emptyFeeds();
     }
+    const notes: LiveFeeds["opsCardNotes"] = { ...feeds.opsCardNotes };
+    (Object.keys(emptyOpsCards()) as OpsCardKey[]).forEach((key) => {
+      notes[key] = sheetError ?? "The dashboard sheet could not be read.";
+    });
+    feeds = { ...feeds, opsCards: emptyOpsCards(), opsCardNotes: notes };
   }
 
   let openHouseError: string | null = null;
@@ -366,6 +371,20 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
       },
     };
   }
+
+  const firmTodos = await readFirmTransactionTodos();
+  const todoNote = [feeds.opsCardNotes?.todos, firmTodos.error].filter(Boolean).join(" ");
+  feeds = {
+    ...feeds,
+    opsCards: {
+      ...feeds.opsCards,
+      todos: [...(feeds.opsCards?.todos ?? []), ...firmTodos.items],
+    },
+    opsCardNotes: {
+      ...feeds.opsCardNotes,
+      ...(todoNote ? { todos: todoNote } : {}),
+    },
+  };
 
   if (!opsReadFailed) {
     await setFeeds(feeds);

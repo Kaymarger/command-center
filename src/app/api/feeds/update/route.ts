@@ -21,6 +21,7 @@ export async function PUT(request: Request) {
     referrals: body.referrals ?? { active: [], history: [] },
     outstandingEmails: body.outstandingEmails ?? [],
     opsCards: body.opsCards ?? emptyOpsCards(),
+    opsCardNotes: body.opsCardNotes ?? {},
     openHouse: {
       rows: body.openHouse?.rows ?? [],
       summary:

@@ -82,11 +82,14 @@ export type OpsCardKey =
   | "outstandingEmails"
   | "docusignDrafts"
   | "subjectRemovals"
-  | "completionDates";
+  | "completionDates"
+  | "todos";
 
 export type OpsCardItem = {
   id: string;
   text: string;
+  /** Outstanding emails split a due list from the next 7 days. */
+  section?: "due" | "upcoming";
 };
 
 export type OpsCards = Record<OpsCardKey, OpsCardItem[]>;
@@ -100,6 +103,7 @@ export function emptyOpsCards(): OpsCards {
     docusignDrafts: [],
     subjectRemovals: [],
     completionDates: [],
+    todos: [],
   };
 }
 
@@ -121,6 +125,7 @@ export type LiveFeeds = {
   birthdays: IxactItem[];
   outstandingEmails: OutstandingEmail[];
   opsCards: OpsCards;
+  opsCardNotes: Partial<Record<OpsCardKey, string>>;
 };
 
 export const AREG_OPS_SHEET_ID = process.env.AREG_OPS_SHEET_ID?.trim() ?? "";
@@ -149,6 +154,7 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
     birthdays: [],
     outstandingEmails: [],
     opsCards: emptyOpsCards(),
+    opsCardNotes: {},
   };
 }
 

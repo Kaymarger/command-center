@@ -27,13 +27,14 @@ Set these as secret environment variables on the host (Production):
 | `BOT_TRANSACTION_KEY` | Transaction bot key |
 | `AREG_OPS_SHEET_ID` | Dashboard Google Sheet id |
 | `OPEN_HOUSE_SHEET_ID` | Google Form responses sheet for open-house availability |
+| `TRANSACTIONS_SHEET_ID` | Firm Transactions spreadsheet. Blank checklist cells are added to To-Do's. |
 | `GOOGLE_SERVICE_ACCOUNT_JSON` | Full JSON key for a Google service account that can read those sheets |
 
 ## Dashboard sheets
 
 The dashboard reads `AREG_OPS_SHEET_ID` on each visit. It does not use the copy of `data/feeds.json` in the repo. Open-house availability reads `OPEN_HOUSE_SHEET_ID`, the responses spreadsheet linked to the Google Form.
 
-A private sheet needs `GOOGLE_SERVICE_ACCOUNT_JSON` (the downloaded key file) and the sheet shared with that account’s `client_email` as a Viewer. Tab names the dashboard looks for: CINC, Anniversaries, Birthdays, Referrals, Open Houses, Outstanding Emails.
+A private sheet needs `GOOGLE_SERVICE_ACCOUNT_JSON` (the downloaded key file) and the sheet shared with that account’s `client_email` as a Viewer. Dashboard tabs: CINC, Anniversaries, Birthdays, ReferralExchangeOnCall, OutstandingEmails, DocuSignDrafts, KeyDates, ToDos, and Open Houses. Firm-transaction checklist rows are read from `TRANSACTIONS_SHEET_ID`, tab Firm Transactions To Dos. Share that spreadsheet with the same service account.
 
 ## Run locally
 

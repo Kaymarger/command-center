@@ -46,8 +46,47 @@ export function formatLongDate(day: CalendarDay): string {
   }).format(new Date(Date.UTC(day.year, day.month - 1, day.day)));
 }
 
+/** "Friday, October 24" — weekday and date, without the year. */
+export function formatWeekday(day: CalendarDay): string {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(day.year, day.month - 1, day.day)));
+}
+
+export function firstCalendarDate(text: string, fallbackYear: number): CalendarDay | null {
+  return parseCalendarDates(text, fallbackYear)[0] ?? null;
+}
+
+/** Next month-and-day on or after today. The year in the sheet is the original year. */
+export function nextAnnualDate(
+  month: number,
+  day: number,
+  today: CalendarDay,
+): CalendarDay | null {
+  const thisYear = { year: today.year, month, day };
+  if (isRealDay(thisYear) && compareCalendarDays(thisYear, today) >= 0) return thisYear;
+  const nextYear = { year: today.year + 1, month, day };
+  if (isRealDay(nextYear)) return nextYear;
+  if (month === 2 && day === 29) {
+    const rolled = { year: today.year + (compareCalendarDays(thisYear, today) >= 0 ? 0 : 1), month: 3, day: 1 };
+    return rolled;
+  }
+  return null;
+}
+
 function dayNumber(day: CalendarDay): number {
   return day.year * 10000 + day.month * 100 + day.day;
+}
+
+export function addCalendarDays(day: CalendarDay, days: number): CalendarDay {
+  return shiftDay(day, days);
+}
+
+export function compareCalendarDays(a: CalendarDay, b: CalendarDay): number {
+  return dayNumber(a) - dayNumber(b);
 }
 
 function shiftDay(day: CalendarDay, days: number): CalendarDay {

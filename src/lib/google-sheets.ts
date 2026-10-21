@@ -24,6 +24,10 @@ export function openHouseSheetId(): string {
   return envValue("OPEN_HOUSE_SHEET_ID");
 }
 
+export function transactionsSheetId(): string {
+  return envValue("TRANSACTIONS_SHEET_ID");
+}
+
 export function loadServiceAccount(): ServiceAccount | null {
   const raw = envValue("GOOGLE_SERVICE_ACCOUNT_JSON");
   if (!raw) return null;
