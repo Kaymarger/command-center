@@ -2,14 +2,16 @@ import {
   emptyFeeds,
   emptyOpsCards,
   LIVE_FEED_POLL_MS,
+  type OpsCardItem,
+  type OpsCardKey,
   sheetTabs,
   summarizeOpenHouses,
   type LiveFeeds,
-  type OpsCardKey,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
 import { currentOpenHouseRows } from "@/lib/dashboard-text";
 import {
+  cincGroupsFromTable,
   findNamedTab,
   FIRM_TODO_TAB,
   OPS_CARD_TABS,
@@ -252,7 +254,23 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
   });
   feeds.opsCards = built.cards;
   feeds.opsCardNotes = built.notes;
+  feeds.cincGroups = cincGroupsFromTable(tables.cinc);
   return { feeds, cardErrors: tables.cardErrors };
+}
+
+export function patchCachedOpsItem(id: string, patch: Partial<OpsCardItem> | null) {
+  const box = dashboardStore();
+  if (!box.payload) return;
+  const cards = { ...box.payload.feeds.opsCards };
+  (Object.keys(cards) as OpsCardKey[]).forEach((key) => {
+    cards[key] = patch
+      ? cards[key].map((item) => (item.id === id ? { ...item, ...patch } : item))
+      : cards[key].filter((item) => item.id !== id);
+  });
+  box.payload = {
+    ...box.payload,
+    feeds: { ...box.payload.feeds, opsCards: cards },
+  };
 }
 
 async function readFirmTransactionTodos(): Promise<{

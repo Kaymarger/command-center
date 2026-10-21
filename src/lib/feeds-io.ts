@@ -25,6 +25,7 @@ export async function readFeedsFile(): Promise<LiveFeeds> {
       outstandingEmails: parsed.outstandingEmails ?? [],
       opsCards: parsed.opsCards ?? emptyOpsCards(),
       opsCardNotes: parsed.opsCardNotes ?? {},
+      cincGroups: parsed.cincGroups ?? [],
     };
   } catch {
     return emptyFeeds("empty");
@@ -185,6 +186,7 @@ export function feedsFromSheetTables(tables: {
     updatedAt: new Date().toISOString(),
     source: "sheet",
     cincAgents,
+    cincGroups: [],
     anniversaries,
     birthdays,
     referrals,
@@ -217,6 +219,7 @@ export function mergeWebhookFeeds(
       : current.openHouse,
     referrals: patch.referrals ?? current.referrals,
     cincAgents: patch.cincAgents ?? current.cincAgents,
+    cincGroups: patch.cincGroups ?? current.cincGroups,
     anniversaries: patch.anniversaries ?? current.anniversaries,
     birthdays: patch.birthdays ?? current.birthdays,
     outstandingEmails:

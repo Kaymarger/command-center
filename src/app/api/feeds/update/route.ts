@@ -16,6 +16,7 @@ export async function PUT(request: Request) {
     updatedAt: new Date().toISOString(),
     source: "webhook",
     cincAgents: body.cincAgents ?? [],
+    cincGroups: body.cincGroups ?? [],
     anniversaries: body.anniversaries ?? [],
     birthdays: body.birthdays ?? [],
     referrals: body.referrals ?? { active: [], history: [] },

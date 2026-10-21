@@ -1,8 +1,10 @@
 import {
   emptyOpsCards,
+  type CincGroup,
   type OpsCardItem,
   type OpsCardKey,
   type OpsCards,
+  type SheetCellRef,
 } from "@/lib/dashboard-data";
 import {
   addCalendarDays,
@@ -10,8 +12,10 @@ import {
   compareCalendarDays,
   firstCalendarDate,
   formatLongDate,
+  formatMonthDay,
   formatWeekday,
   nextAnnualDate,
+  subtractMonths,
   type CalendarDay,
 } from "@/lib/dashboard-text";
 import type { SheetTab } from "@/lib/google-sheets";
@@ -104,17 +108,42 @@ function headerIndex(rows: string[][], markers: string[]): number {
 }
 
 function recordsFrom(rows: string[][], markers: string[]): Record<string, string>[] {
-  if (!rows.length) return [];
+  return locateRows(rows, markers).items.map((item) => item.record);
+}
+
+function locateRows(rows: string[][], markers: string[]): {
+  columns: Record<string, number>;
+  items: { rowNumber: number; record: Record<string, string> }[];
+} {
+  if (!rows.length) return { columns: {}, items: [] };
   const index = headerIndex(rows, markers);
   const headers = (rows[index] ?? []).map(normHeader);
-  return rows.slice(index + 1).map((row) => {
-    const record: Record<string, string> = {};
-    headers.forEach((key, column) => {
-      if (!key) return;
-      record[key] = (row[column] ?? "").trim();
-    });
-    return record;
-  }).filter((record) => Object.values(record).some(Boolean));
+  const columns: Record<string, number> = {};
+  headers.forEach((key, column) => {
+    if (key && columns[key] == null) columns[key] = column;
+  });
+  const items = rows
+    .slice(index + 1)
+    .map((row, offset) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (!key) return;
+        record[key] = (row[column] ?? "").trim();
+      });
+      return { rowNumber: index + 2 + offset, record };
+    })
+    .filter((item) => Object.values(item.record).some(Boolean));
+  return { columns, items };
+}
+
+function cellRef(
+  spreadsheet: SheetCellRef["spreadsheet"],
+  tab: string,
+  row: number,
+  column: number | undefined,
+): SheetCellRef | undefined {
+  if (column == null || column < 0) return undefined;
+  return { spreadsheet, tab, row, column };
 }
 
 function field(record: Record<string, string>, ...keys: string[]): string {
@@ -131,8 +160,12 @@ function closedStatus(status: string): boolean {
   );
 }
 
-function item(id: string, text: string, section?: OpsCardItem["section"]): OpsCardItem {
-  return section ? { id, text, section } : { id, text };
+function item(
+  id: string,
+  text: string,
+  extra?: Partial<Omit<OpsCardItem, "id" | "text">>,
+): OpsCardItem {
+  return { id, text, ...extra };
 }
 
 function annualRows(
@@ -162,35 +195,24 @@ function annualRows(
 }
 
 function referralRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
+  const cutoff = subtractMonths(today, 3);
   return recordsFrom(rows, ["agent", "week_start"])
     .map((record) => ({
       agent: field(record, "agent"),
       phone: field(record, "phone"),
       note: field(record, "note", "notes"),
       week: firstCalendarDate(field(record, "week_start"), today.year),
-      setOn: firstCalendarDate(field(record, "set_on"), today.year),
     }))
-    .filter((row) => row.agent)
-    .sort((a, b) => {
-      const week = compareCalendarDays(
-        b.week ?? { year: 0, month: 1, day: 1 },
-        a.week ?? { year: 0, month: 1, day: 1 },
-      );
-      if (week !== 0) return week;
-      return compareCalendarDays(
-        b.setOn ?? { year: 0, month: 1, day: 1 },
-        a.setOn ?? { year: 0, month: 1, day: 1 },
-      );
-    })
-    .slice(0, OPS_CARD_TABS.referralExchange.latest ?? 6)
-    .map((row, index) => {
-      const parts = [row.agent];
-      if (row.phone) parts.push(row.phone);
-      if (row.week) parts.push(`week of ${formatLongDate(row.week)}`);
-      if (row.setOn) parts.push(`set ${formatWeekday(row.setOn)}`);
-      if (row.note) parts.push(row.note);
-      return item(`referral-${index}`, parts.join(" · "));
-    });
+    .filter(
+      (row): row is typeof row & { week: CalendarDay } =>
+        Boolean(row.agent && row.week && compareCalendarDays(row.week, cutoff) >= 0),
+    )
+    .sort((a, b) => compareCalendarDays(b.week, a.week))
+    .map((row) =>
+      item(`referral-${row.week.year}-${row.week.month}-${row.week.day}-${row.agent}`, `${formatMonthDay(row.week)} · ${row.agent}`, {
+        detail: [row.phone, row.note].filter(Boolean).join(" · ") || undefined,
+      }),
+    );
 }
 
 function emailLabel(type: string): string {
@@ -204,11 +226,14 @@ function emailLabel(type: string): string {
 
 function emailRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
   const horizon = addCalendarDays(today, 7);
-  const open = recordsFrom(rows, ["address", "due_date"])
-    .map((record) => ({
+  const located = locateRows(rows, ["address", "due_date"]);
+  const open = located.items
+    .map(({ rowNumber, record }) => ({
+      rowNumber,
       address: field(record, "address"),
       type: field(record, "email_type"),
       status: field(record, "status"),
+      draftId: field(record, "draft_id"),
       due: firstCalendarDate(field(record, "due_date"), today.year),
     }))
     .filter((row) => row.address && row.due && !/^(sent|skipped)$/i.test(row.status.trim()));
@@ -223,16 +248,19 @@ function emailRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
     })
     .sort((a, b) => compareCalendarDays(a.due!, b.due!));
 
-  const line = (row: (typeof open)[number], section: OpsCardItem["section"], index: number) =>
-    item(
-      `email-${section}-${index}`,
-      `${row.address} · ${emailLabel(row.type) || "email"} · due ${formatLongDate(row.due!)}`,
+  const line = (row: (typeof open)[number], section: OpsCardItem["section"]) => {
+    const sending = /^sending$/i.test(row.status.trim());
+    const label = emailLabel(row.type) || "email";
+    return item(`email-${row.rowNumber}`, `${row.address} · ${label}`, {
       section,
-    );
-  return [
-    ...due.map((row, index) => line(row, "due", index)),
-    ...upcoming.map((row, index) => line(row, "upcoming", index)),
-  ];
+      detail: `Due ${formatLongDate(row.due!)}${row.draftId ? ` · draft ${row.draftId}` : ""}`,
+      draftId: sending ? undefined : row.draftId || undefined,
+      busy: sending,
+      skipValue: "skipped",
+      sheet: cellRef("ops", OPS_CARD_TABS.outstandingEmails.tab, row.rowNumber, located.columns.status),
+    });
+  };
+  return [...due.map((row) => line(row, "due")), ...upcoming.map((row) => line(row, "upcoming"))];
 }
 
 function draftRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
@@ -310,8 +338,10 @@ export function todoSentenceFromSheet(
 }
 
 function todoRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
-  return recordsFrom(rows, ["item"])
-    .map((record) => ({
+  const located = locateRows(rows, ["item"]);
+  return located.items
+    .map(({ rowNumber, record }) => ({
+      rowNumber,
       task: field(record, "item"),
       address: field(record, "address"),
       status: field(record, "status"),
@@ -324,16 +354,21 @@ function todoRows(rows: string[][], today: CalendarDay): OpsCardItem[] {
       if (b.due) return 1;
       return 0;
     })
-    .map((row, index) =>
-      item(`todo-${index}`, todoSentenceFromSheet(row.task, row.address, row.due)),
-    )
+    .map((row) => {
+      const text = todoSentenceFromSheet(row.task, row.address, row.due);
+      return item(`todo-${row.rowNumber}`, text, {
+        detail: text,
+        skipValue: "skipped",
+        sheet: cellRef("ops", OPS_CARD_TABS.todos.tab, row.rowNumber, located.columns.status),
+      });
+    })
     .filter((row) => row.text);
 }
 
 export function transactionChecklistItems(rows: string[][]): OpsCardItem[] {
-  const body = recordsFrom(rows, ["transactions", "client_name"]);
+  const located = locateRows(rows, ["transactions", "client_name"]);
   const items: OpsCardItem[] = [];
-  body.forEach((record, rowIndex) => {
+  located.items.forEach(({ rowNumber, record }) => {
     const property = field(record, "transactions", "transaction");
     const client = field(record, "client_name");
     const who =
@@ -343,10 +378,95 @@ export function transactionChecklistItems(rows: string[][]): OpsCardItem[] {
     if (!who) return;
     FIRM_CHECKS.forEach((check) => {
       if ((record[check.column] ?? "").trim()) return;
-      items.push(item(`firm-${rowIndex}-${check.column}`, check.sentence(who)));
+      const text = check.sentence(who);
+      items.push(
+        item(`firm-${rowNumber}-${check.column}`, text, {
+          detail: text,
+          skipValue: "n/a",
+          sheet: cellRef("transactions", FIRM_TODO_TAB, rowNumber, located.columns[check.column]),
+        }),
+      );
     });
   });
   return items;
+}
+
+function cincPeriod(header: string): "today" | "week" | "year" | "all" | "skip" {
+  const value = header.toLowerCase();
+  if (/today/.test(value)) return "today";
+  if (/ytd|year/.test(value)) return "year";
+  if (/wtd|week/.test(value)) return "week";
+  if (/mtd|month/.test(value)) return "skip";
+  return "all";
+}
+
+function cincLabel(header: string): string {
+  const stripped = header
+    .replace(/today|week to date|year to date|wtd|ytd|mtd/gi, "")
+    .replace(/[^a-z0-9]+/gi, " ")
+    .trim()
+    .toLowerCase();
+  if (/connect/.test(stripped)) return "connects";
+  if (/appoint|appt/.test(stripped)) return "appts";
+  if (/call/.test(stripped)) return "calls";
+  return stripped || "count";
+}
+
+function numeric(value: string): number | null {
+  if (!value.trim()) return null;
+  const n = Number(value.replace(/,/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Group the CINC tab by agent and sum whatever count columns it has. */
+export function cincGroupsFromTable(rows: string[][]): CincGroup[] {
+  if (!rows.length) return [];
+  const headerAt = rows.slice(0, 8).findIndex((row) =>
+    row.some((cell) => /agent|^name$/i.test(cell.trim())),
+  );
+  const headerIndex = headerAt >= 0 ? headerAt : 0;
+  const headers = (rows[headerIndex] ?? []).map((cell) => cell.trim());
+  const agentColumn = Math.max(
+    0,
+    headers.findIndex((header) => /agent|^name$/i.test(header)),
+  );
+  const countColumns = headers
+    .map((header, column) => ({ header, column, period: cincPeriod(header) }))
+    .filter((column) => column.column !== agentColumn && column.period !== "skip")
+    .filter((column) =>
+      rows.slice(headerIndex + 1).some((row) => numeric(row[column.column] ?? "") != null),
+    );
+  const hasPeriod = countColumns.some((column) => column.period !== "all");
+  const used = countColumns.filter((column) => (hasPeriod ? column.period !== "all" : true));
+  const groups = new Map<string, CincGroup>();
+
+  rows.slice(headerIndex + 1).forEach((row) => {
+    const agent = (row[agentColumn] ?? "").trim();
+    if (!agent || /^(agent|name)$/i.test(agent)) return;
+    const group = groups.get(agent.toLowerCase()) ?? {
+      agent,
+      today: [],
+      week: [],
+      year: [],
+    };
+    used.forEach((column) => {
+      const value = numeric(row[column.column] ?? "");
+      if (value == null) return;
+      const label = cincLabel(column.header);
+      const periods: (keyof Pick<CincGroup, "today" | "week" | "year">)[] =
+        column.period === "today" || column.period === "week" || column.period === "year"
+          ? [column.period]
+          : ["today", "week", "year"];
+      periods.forEach((period) => {
+        const existing = group[period].find((count) => count.label === label);
+        if (existing) existing.value += value;
+        else group[period].push({ label, value });
+      });
+    });
+    groups.set(agent.toLowerCase(), group);
+  });
+
+  return [...groups.values()].sort((a, b) => a.agent.localeCompare(b.agent));
 }
 
 function tabRows(

@@ -50,9 +50,9 @@ export function DashboardNotepad({
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       {rendered.length > 0 ? (
-        <ul className="grid min-h-0 flex-1 gap-1.5 overflow-y-auto">
+        <ul className="grid min-h-0 flex-1 gap-0.5 overflow-y-auto">
           {rendered.map((line, index) => (
-            <li key={`${line}-${index}`} className="text-sm leading-snug text-foreground">
+            <li key={`${line}-${index}`} title={line} className="truncate text-xs leading-snug text-foreground">
               {line}
             </li>
           ))}
@@ -63,7 +63,7 @@ export function DashboardNotepad({
         onChange={(e) => setValue(e.target.value)}
         onBlur={() => setValue(organizeNotes(value, kind))}
         placeholder={placeholder}
-        className="h-16 shrink-0 resize-none border-white/10 bg-black/20 text-sm leading-relaxed"
+        className="h-10 shrink-0 resize-none border-white/10 bg-black/20 text-xs leading-snug"
       />
       <Button
         type="button"

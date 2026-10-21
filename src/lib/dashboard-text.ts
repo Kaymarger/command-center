@@ -81,6 +81,20 @@ function dayNumber(day: CalendarDay): number {
   return day.year * 10000 + day.month * 100 + day.day;
 }
 
+export function subtractMonths(day: CalendarDay, months: number): CalendarDay {
+  const utc = new Date(Date.UTC(day.year, day.month - 1 - months, 1));
+  const year = utc.getUTCFullYear();
+  const month = utc.getUTCMonth() + 1;
+  const last = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  return { year, month, day: Math.min(day.day, last) };
+}
+
+const SHORT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+export function formatMonthDay(day: CalendarDay): string {
+  return `${SHORT_MONTHS[day.month - 1] ?? ""} ${day.day}`;
+}
+
 export function addCalendarDays(day: CalendarDay, days: number): CalendarDay {
   return shiftDay(day, days);
 }

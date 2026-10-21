@@ -85,11 +85,39 @@ export type OpsCardKey =
   | "completionDates"
   | "todos";
 
+export type SheetCellRef = {
+  spreadsheet: "ops" | "transactions";
+  tab: string;
+  /** 1-based sheet row. */
+  row: number;
+  /** 0-based column index. */
+  column: number;
+};
+
 export type OpsCardItem = {
   id: string;
   text: string;
+  /** Extra text shown on hover or when the line is expanded. */
+  detail?: string;
   /** Outstanding emails split a due list from the next 7 days. */
   section?: "due" | "upcoming";
+  /** Cell a Skip (or Send) button writes. */
+  sheet?: SheetCellRef;
+  /** Value written by Skip. */
+  skipValue?: "skipped" | "n/a";
+  /** Gmail draft id for an outstanding-email Send. */
+  draftId?: string;
+  /** True once a send has been queued. */
+  busy?: boolean;
+};
+
+export type CincCount = { label: string; value: number };
+
+export type CincGroup = {
+  agent: string;
+  today: CincCount[];
+  week: CincCount[];
+  year: CincCount[];
 };
 
 export type OpsCards = Record<OpsCardKey, OpsCardItem[]>;
@@ -119,6 +147,7 @@ export type LiveFeeds = {
   updatedAt: string;
   source: "empty" | "sheet" | "webhook" | "mixed";
   cincAgents: CincAgentStats[];
+  cincGroups: CincGroup[];
   openHouse: { summary: string; rows: OpenHouseRow[] };
   referrals: { active: ReferralItem[]; history: ReferralItem[] };
   anniversaries: IxactItem[];
@@ -151,6 +180,7 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
     updatedAt: new Date().toISOString(),
     source,
     cincAgents: [],
+    cincGroups: [],
     openHouse: { summary: "", rows: [] },
     referrals: { active: [], history: [] },
     anniversaries: [],
@@ -164,6 +194,7 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
 export function feedHasRows(feeds: LiveFeeds): boolean {
   return (
     feeds.cincAgents.length > 0 ||
+    (feeds.cincGroups?.length ?? 0) > 0 ||
     feeds.openHouse.rows.length > 0 ||
     feeds.referrals.active.length > 0 ||
     feeds.referrals.history.length > 0 ||

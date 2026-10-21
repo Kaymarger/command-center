@@ -14,6 +14,7 @@ import {
   getFeeds,
   reloadFeedsFromDisk,
   setFeeds,
+  loadJob,
   upsertJob,
   type BotJob,
   type DraftEmail,
@@ -500,6 +501,13 @@ async function completeTransactionJob(
   const details = input.detailsValue?.trim();
   const delivery = input.deliveryMode ?? "draft";
 
+  if (input.actionId === "send-gmail-draft" || input.actionId === "send-email-draft") {
+    return {
+      result: sentToComplete("transaction", input.summary),
+      artifacts: [],
+    };
+  }
+
   if (input.actionId === "update-conveyancing") {
     const draft = buildConveyancingDraft(input);
     const gmail = await queueGmail(jobId, input.actionId, draft, delivery);
@@ -693,6 +701,54 @@ function rememberJob(job: BotJob) {
   }
 }
 
+export async function signalExistingJob(
+  jobId: string,
+  command: "pause" | "cancel",
+): Promise<BotJob> {
+  const existing = await loadJob(jobId);
+  if (!existing) {
+    throw new Error("That job is not on this dashboard.");
+  }
+  if (existing.status === "cancelled") {
+    return existing;
+  }
+  const status = command === "pause" ? "paused" : "cancelled";
+  const actionId = command === "pause" ? "pause-job" : "cancel-job";
+  const actionLabel = command === "pause" ? "Pause job" : "Cancel job";
+  const summary = `${command === "pause" ? "Pause" : "Cancel"} this job: ${existing.actionLabel}. ${existing.summary}`;
+  const signal: BotJob = {
+    ...existing,
+    actionId,
+    actionLabel,
+    summary,
+    status,
+    updatedAt: new Date().toISOString(),
+  };
+  const input: DispatchInput = {
+    actionId,
+    actionLabel,
+    bot: existing.bot,
+    summary,
+    primaryValue: existing.id,
+    secondaryValue: existing.actionId,
+  };
+  const external = existing.bot === "none" ? null : await forwardToExternalBot(signal, input);
+  const updated: BotJob = {
+    ...existing,
+    status,
+    webhookDelivery: external?.delivery ?? existing.webhookDelivery,
+    result: external?.forwarded
+      ? `${command === "pause" ? "Paused" : "Cancelled"}. The webhook replied ${external.delivery.httpStatus}.`
+      : external
+        ? external.delivery.error ??
+          `${command === "pause" ? "Paused" : "Cancelled"} on this dashboard. The webhook was not accepted.`
+        : `${command === "pause" ? "Paused" : "Cancelled"} on this dashboard.`,
+    updatedAt: new Date().toISOString(),
+  };
+  rememberJob(updated);
+  return updated;
+}
+
 export async function dispatchToBot(
   input: DispatchInput
 ): Promise<BotJob & { composeUrl?: string }> {
@@ -725,7 +781,9 @@ export async function dispatchToBot(
     ensureFeedLoop();
     await reloadFeedsFromDisk();
 
-    if (input.bot === "work-routine" || input.actionId === "areg-chat") {
+    if (input.actionId === "send-gmail-draft" || input.actionId === "send-email-draft") {
+      job = { ...job, result: sentToComplete(input.bot, input.summary) };
+    } else if (input.bot === "work-routine" || input.actionId === "areg-chat") {
       const completed = await completeWorkRoutineJob(input, job.id);
       artifacts = completed.artifacts;
       job = { ...job, bot: "work-routine", result: completed.result };

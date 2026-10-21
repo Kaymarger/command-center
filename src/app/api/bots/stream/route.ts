@@ -1,5 +1,5 @@
 import {
-  ensureFeedLoop,
+  awaitStoreReady,
   getFeeds,
   listArtifacts,
   listDrafts,
@@ -15,7 +15,7 @@ export async function GET(request: Request) {
   const denied = await requireUserSession();
   if (denied) return denied;
 
-  ensureFeedLoop();
+  await awaitStoreReady();
 
   let cleanup = () => {};
 

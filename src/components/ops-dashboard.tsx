@@ -4,7 +4,15 @@ import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { ArrowLeft, ArrowUpRight, Mail } from "lucide-react";
 import { artifactKindLabel, type BotArtifact } from "@/lib/artifacts";
-import { bots, type BotId, type OpsCardItem } from "@/lib/dashboard-data";
+import { botLabel } from "@/lib/ops-actions";
+import type { BotJob } from "@/lib/bot-store";
+import {
+  bots,
+  type BotId,
+  type CincAgentStats,
+  type CincGroup,
+  type OpsCardItem,
+} from "@/lib/dashboard-data";
 import { useLiveFeeds } from "@/hooks/use-live-feeds";
 import { DashboardNotepad } from "@/components/dashboard-notepad";
 import { cn } from "@/lib/utils";
@@ -20,37 +28,116 @@ function ArtifactList({
     return <EmptyTile message={empty} />;
   }
   return (
-    <ul className="grid gap-2">
+    <ul className="grid gap-1">
       {items.map((item) => (
         <li
           key={item.id}
-          className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5"
+          className="truncate rounded-md border border-white/10 bg-black/20 px-1.5 py-1 text-xs text-foreground"
+          title={[item.title, item.detail, item.property].filter(Boolean).join(" · ")}
         >
-          <div className="flex items-start justify-between gap-2">
-            <p className="text-sm font-medium text-foreground">{item.title}</p>
-            <span className="shrink-0 text-[0.65rem] uppercase tracking-[0.12em] text-[#7395B8]">
-              {item.status}
-            </span>
-          </div>
-          <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-            {item.detail}
-          </p>
-          <p className="mt-1 text-[0.65rem] text-[#7395B8]/90">
-            {artifactKindLabel(item.kind)}
-            {item.property ? ` · ${item.property}` : ""}
-          </p>
+          <span className="font-medium">{item.title}</span>
+          <span className="text-muted-foreground">
+            {" "}
+            · {item.status}
+            {item.property ? ` · ${item.property}` : ""} · {artifactKindLabel(item.kind)}
+          </span>
         </li>
       ))}
     </ul>
   );
 }
 
-function SheetLines({ items }: { items: OpsCardItem[] }) {
+function MiniButton({
+  children,
+  disabled,
+  onClick,
+  title,
+}: {
+  children: ReactNode;
+  disabled?: boolean;
+  onClick: () => void;
+  title?: string;
+}) {
   return (
-    <ul className="grid gap-2">
-      {items.map((item) => (
-        <li key={item.id} className="text-sm leading-snug text-foreground">
-          {item.text}
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className="shrink-0 rounded border border-white/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-[#7395B8] transition hover:border-[#7395B8]/60 hover:text-foreground disabled:opacity-40"
+    >
+      {children}
+    </button>
+  );
+}
+
+function CompactRow({
+  text,
+  detail,
+  expanded,
+  onToggle,
+  children,
+}: {
+  text: string;
+  detail?: string;
+  expanded: boolean;
+  onToggle: () => void;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="rounded-md border border-white/10 bg-black/20">
+      <div className="flex items-center gap-1 px-1.5 py-0.5">
+        <button
+          type="button"
+          title={detail || text}
+          onClick={onToggle}
+          className="min-w-0 flex-1 truncate text-left text-xs text-foreground"
+        >
+          {text}
+        </button>
+        {children}
+      </div>
+      {expanded && detail ? (
+        <p className="whitespace-pre-wrap border-t border-white/10 px-1.5 py-1 text-[0.7rem] leading-snug text-muted-foreground">
+          {detail}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function SheetLines({
+  items,
+  expandedId,
+  onToggle,
+  hidden,
+  errors,
+  renderActions,
+}: {
+  items: OpsCardItem[];
+  expandedId: string | null;
+  onToggle: (id: string) => void;
+  hidden: Set<string>;
+  errors?: Record<string, string>;
+  renderActions?: (item: OpsCardItem) => ReactNode;
+}) {
+  const visible = items.filter((item) => !hidden.has(item.id));
+  if (visible.length === 0) return null;
+  return (
+    <ul className="grid gap-1">
+      {visible.map((item) => (
+        <li key={item.id}>
+          <CompactRow
+            text={item.busy && !item.text.endsWith("· sending") ? `${item.text} · sending` : item.text}
+            detail={item.detail || item.text}
+            expanded={expandedId === item.id}
+            onToggle={() => onToggle(item.id)}
+          >
+            {renderActions?.(item)}
+          </CompactRow>
+          {errors?.[item.id] ? (
+            <p className="px-1 pt-0.5 text-[0.65rem] text-amber-200">{errors[item.id]}</p>
+          ) : null}
         </li>
       ))}
     </ul>
@@ -65,6 +152,11 @@ function OpsSheetCard({
   live,
   botId,
   comingUp,
+  expandedId,
+  onToggle,
+  hidden,
+  errors,
+  renderActions,
 }: {
   title: string;
   items: OpsCardItem[];
@@ -73,23 +165,31 @@ function OpsSheetCard({
   live?: boolean;
   botId?: BotId;
   comingUp?: boolean;
+  expandedId: string | null;
+  onToggle: (id: string) => void;
+  hidden: Set<string>;
+  errors?: Record<string, string>;
+  renderActions?: (item: OpsCardItem) => ReactNode;
 }) {
-  const due = items.filter((item) => item.section !== "upcoming");
-  const upcoming = items.filter((item) => item.section === "upcoming");
+  const visible = items.filter((item) => !hidden.has(item.id));
+  const due = visible.filter((item) => item.section !== "upcoming");
+  const upcoming = visible.filter((item) => item.section === "upcoming");
   const showEmpty = due.length === 0 && upcoming.length === 0 && !note;
   return (
     <Tile title={title} live={live} botId={botId}>
-      {note ? <div className="mb-2"><SheetProblem message={note} /></div> : null}
+      {note ? <div className="mb-1"><SheetProblem message={note} /></div> : null}
       {showEmpty ? <EmptyTile message={empty} /> : null}
-      {due.length > 0 ? <SheetLines items={due} /> : null}
+      {due.length > 0 ? (
+        <SheetLines items={due} expandedId={expandedId} onToggle={onToggle} hidden={hidden} errors={errors} renderActions={renderActions} />
+      ) : null}
       {upcoming.length > 0 ? (
-        <div className={due.length > 0 ? "mt-3" : undefined}>
+        <div className={due.length > 0 ? "mt-2" : undefined}>
           {comingUp ? (
-            <p className="mb-1 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-[#7395B8]">
+            <p className="mb-0.5 text-[0.6rem] font-semibold uppercase tracking-[0.14em] text-[#7395B8]">
               Coming up
             </p>
           ) : null}
-          <SheetLines items={upcoming} />
+          <SheetLines items={upcoming} expandedId={expandedId} onToggle={onToggle} hidden={hidden} errors={errors} renderActions={renderActions} />
         </div>
       ) : null}
     </Tile>
@@ -98,7 +198,7 @@ function OpsSheetCard({
 
 function EmptyTile({ message }: { message: string }) {
   return (
-    <p className="flex h-full items-center justify-center px-2 text-center text-sm text-muted-foreground">
+    <p className="flex h-full items-center justify-center px-1 text-center text-xs text-muted-foreground">
       {message}
     </p>
   );
@@ -110,7 +210,7 @@ function SheetProblem({ message }: { message: string }) {
 
 function LiveDot({ live }: { live: boolean }) {
   return (
-    <span className="inline-flex items-center gap-1.5 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[#7395B8]">
+    <span className="inline-flex items-center gap-1 text-[0.6rem] font-medium uppercase tracking-[0.12em] text-[#7395B8]">
       <span className="relative flex size-1.5">
         {live ? (
           <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-400/80" />
@@ -132,7 +232,7 @@ function BotSourceLink({ botId }: { botId: BotId }) {
   return (
     <Link
       href={bot.href}
-      className="inline-flex shrink-0 items-center gap-0.5 text-[0.65rem] font-medium uppercase tracking-[0.14em] text-[#7395B8] transition hover:text-foreground"
+      className="inline-flex shrink-0 items-center gap-0.5 text-[0.6rem] font-medium uppercase tracking-[0.12em] text-[#7395B8] transition hover:text-foreground"
       title={`Open ${bot.label}`}
     >
       {bot.label}
@@ -157,12 +257,12 @@ function Tile({
   return (
     <section
       className={cn(
-        "flex aspect-[12/7] min-h-[9rem] flex-col overflow-hidden rounded-2xl border border-[#7395B8]/30 bg-white/[0.06] p-3.5 backdrop-blur-xl sm:min-h-0",
+        "flex max-h-[13rem] min-h-[6.25rem] flex-col overflow-hidden rounded-xl border border-[#7395B8]/30 bg-white/[0.06] p-2 backdrop-blur-xl",
         className
       )}
     >
-      <div className="mb-2 flex shrink-0 flex-wrap items-start justify-between gap-2">
-        <h2 className="font-heading text-base tracking-tight text-foreground sm:text-lg">
+      <div className="mb-1 flex shrink-0 flex-wrap items-start justify-between gap-1">
+        <h2 className="font-heading text-sm tracking-tight text-foreground">
           {title}
         </h2>
         <div className="flex flex-col items-end gap-1">
@@ -173,6 +273,29 @@ function Tile({
       <div className="min-h-0 flex-1 overflow-y-auto pr-0.5">{children}</div>
     </section>
   );
+}
+
+function cincCounts(stats: CincAgentStats["wtd"]): CincGroup["week"] {
+  return [
+    { label: "calls", value: stats.calls },
+    { label: "connects", value: stats.connected },
+    { label: "appts", value: stats.appointments },
+  ];
+}
+
+function cincGroupsFor(groups: CincGroup[] | undefined, agents: CincAgentStats[] | undefined): CincGroup[] {
+  if (groups?.length) return groups;
+  return (agents ?? []).map((agent) => ({
+    agent: agent.agent,
+    today: [],
+    week: cincCounts(agent.wtd),
+    year: cincCounts(agent.ytd),
+  }));
+}
+
+function cincLine(counts: CincGroup["week"]): string {
+  if (!counts.length) return "No counts";
+  return counts.map((count) => `${count.value} ${count.label}`).join(" · ");
 }
 
 export function OpsDashboard() {
@@ -187,10 +310,20 @@ export function OpsDashboard() {
     openHouseError,
     cardErrors,
   } = useLiveFeeds();
-  const [expandedDraft, setExpandedDraft] = useState<string | null>(null);
-  const [cincPeriod, setCincPeriod] = useState<"wtd" | "mtd" | "ytd">("wtd");
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [cincPeriod, setCincPeriod] = useState<"today" | "week" | "year">("week");
   const [updatedLabel, setUpdatedLabel] = useState<string>("—");
-  const recentJobs = jobs.slice(0, 8);
+  const [hiddenIds, setHiddenIds] = useState<Set<string>>(() => new Set());
+  const [actionError, setActionError] = useState<Record<string, string>>({});
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [jobOverride, setJobOverride] = useState<Record<string, BotJob>>({});
+  const [queuedDrafts, setQueuedDrafts] = useState<Set<string>>(() => new Set());
+  const [sendingIds, setSendingIds] = useState<Set<string>>(() => new Set());
+  const recentJobs = jobs.slice(0, 8).map((job) => {
+    const override = jobOverride[job.id];
+    if (override && override.updatedAt >= job.updatedAt) return override;
+    return job;
+  });
   const emailDrafts = [...drafts]
     .sort(
       (a, b) =>
@@ -198,7 +331,6 @@ export function OpsDashboard() {
         Date.parse(a.createdAt || a.updatedAt || ""),
     )
     .slice(0, 10);
-  const chatOutbox = artifacts.filter((a) => a.kind === "chat").slice(0, 8);
   const socialQueue = artifacts
     .filter((a) => a.kind === "social" || a.kind === "feature-sheet")
     .slice(0, 8);
@@ -215,6 +347,81 @@ export function OpsDashboard() {
 
   const opsCards = feeds.opsCards;
   const opsNotes = feeds.opsCardNotes ?? {};
+  const cincGroups = cincGroupsFor(feeds.cincGroups, feeds.cincAgents);
+
+  function toggle(id: string) {
+    setExpandedId((current) => (current === id ? null : id));
+  }
+
+  async function postAction(id: string, body: Record<string, unknown>) {
+    setPendingId(id);
+    setActionError((current) => ({ ...current, [id]: "" }));
+    try {
+      const res = await fetch("/api/dashboard/action", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = (await res.json()) as { ok?: boolean; error?: string; job?: BotJob };
+      if (!res.ok || !data.ok) throw new Error(data.error || "That did not work.");
+      return data;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "That did not work.";
+      setActionError((current) => ({ ...current, [id]: message }));
+      return null;
+    } finally {
+      setPendingId(null);
+    }
+  }
+
+  async function skipSheetItem(item: OpsCardItem) {
+    if (!item.sheet || !item.skipValue) return;
+    const data = await postAction(item.id, {
+      type: "skip-cell",
+      itemId: item.id,
+      spreadsheet: item.sheet.spreadsheet,
+      tab: item.sheet.tab,
+      row: item.sheet.row,
+      column: item.sheet.column,
+      value: item.skipValue,
+    });
+    if (data) setHiddenIds((current) => new Set(current).add(item.id));
+  }
+
+  async function sendOutstanding(item: OpsCardItem) {
+    if (!item.sheet || !item.draftId) return;
+    const address = item.text.split("·")[0]?.trim() ?? item.text;
+    if (!window.confirm(`Send this email for ${address}? It will be queued to the Transaction Bot.`)) {
+      return;
+    }
+    const data = await postAction(item.id, {
+      type: "send-outstanding",
+      itemId: item.id,
+      draftId: item.draftId,
+      address,
+      emailType: item.detail ?? "",
+      row: item.sheet.row,
+      column: item.sheet.column,
+    });
+    if (data) setSendingIds((current) => new Set(current).add(item.id));
+  }
+
+  async function controlJob(job: BotJob, command: "pause" | "cancel") {
+    const data = await postAction(job.id, { type: "job-control", jobId: job.id, command });
+    if (data?.job) setJobOverride((current) => ({ ...current, [job.id]: data.job as BotJob }));
+  }
+
+  async function skipDraft(job: BotJob) {
+    const data = await postAction(job.id, { type: "draft-skip", jobId: job.id });
+    if (data) setHiddenIds((current) => new Set(current).add(job.id));
+  }
+
+  async function sendDraft(job: BotJob) {
+    const subject = job.draftEmail?.subject || "this draft";
+    if (!window.confirm(`Send “${subject}” through the ${botLabel(job.bot)}?`)) return;
+    const data = await postAction(job.id, { type: "draft-send", jobId: job.id });
+    if (data) setQueuedDrafts((current) => new Set(current).add(job.id));
+  }
 
   return (
     <div className="relative mx-auto flex w-full max-w-7xl flex-col px-4 pb-16 pt-8 sm:px-6 sm:pt-12">
@@ -260,46 +467,59 @@ export function OpsDashboard() {
         </div>
       </header>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
         <Tile title="Sent to Bots" live={live}>
           {recentJobs.length === 0 ? (
             <EmptyTile message="Jobs you enter in the command center show up here after they’re sent to Bots." />
           ) : (
-            <ul className="grid gap-2">
-              {recentJobs.map((job) => (
-                <li
-                  key={job.id}
-                  className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="text-sm font-medium text-foreground">
-                      {job.actionLabel}
-                    </p>
-                    <span
-                      className={
-                        job.webhookDelivery?.status === "sent"
-                          ? "shrink-0 text-[0.65rem] uppercase tracking-[0.12em] text-emerald-300"
-                          : job.webhookDelivery?.status === "failed"
-                            ? "shrink-0 text-[0.65rem] uppercase tracking-[0.12em] text-red-300"
-                            : job.webhookDelivery?.status === "not_configured"
-                              ? "shrink-0 text-[0.65rem] uppercase tracking-[0.12em] text-amber-200"
-                              : "shrink-0 text-[0.65rem] uppercase tracking-[0.12em] text-[#7395B8]"
-                      }
-                    >
-                      {job.webhookDelivery?.status === "sent"
+            <ul className="grid gap-1">
+              {recentJobs.map((job) => {
+                const status =
+                  job.status === "paused"
+                    ? "Paused"
+                    : job.status === "cancelled"
+                      ? "Cancelled"
+                      : job.webhookDelivery?.status === "sent"
                         ? "Sent to Bot"
                         : job.webhookDelivery?.status === "failed"
                           ? "Send failed"
                           : job.webhookDelivery?.status === "not_configured"
                             ? "Not linked"
-                            : job.status}
-                    </span>
-                  </div>
-                  <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-                    {job.result || job.summary}
-                  </p>
-                </li>
-              ))}
+                            : job.status;
+                return (
+                  <li key={job.id}>
+                    <CompactRow
+                      text={job.actionLabel}
+                      detail={job.result || job.summary}
+                      expanded={expandedId === job.id}
+                      onToggle={() => toggle(job.id)}
+                    >
+                      <span className="shrink-0 text-[0.6rem] uppercase tracking-[0.08em] text-[#7395B8]">
+                        {status}
+                      </span>
+                      {job.status !== "cancelled" ? (
+                        <>
+                          <MiniButton
+                            disabled={pendingId === job.id || job.status === "paused"}
+                            onClick={() => void controlJob(job, "pause")}
+                          >
+                            Pause
+                          </MiniButton>
+                          <MiniButton
+                            disabled={pendingId === job.id}
+                            onClick={() => void controlJob(job, "cancel")}
+                          >
+                            Cancel
+                          </MiniButton>
+                        </>
+                      ) : null}
+                    </CompactRow>
+                    {actionError[job.id] ? (
+                      <p className="px-1 pt-0.5 text-[0.65rem] text-amber-200">{actionError[job.id]}</p>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </Tile>
@@ -310,66 +530,101 @@ export function OpsDashboard() {
           items={opsCards?.todos ?? []}
           note={opsNotes.todos}
           empty="No open to-dos."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
+          errors={actionError}
+          renderActions={(item) =>
+            item.sheet ? (
+              <MiniButton disabled={pendingId === item.id} onClick={() => void skipSheetItem(item)}>
+                Skip
+              </MiniButton>
+            ) : null
+          }
         />
 
         <OpsSheetCard
           title="Outstanding Emails"
           live={live}
           comingUp
-          items={opsCards?.outstandingEmails ?? []}
+          items={(opsCards?.outstandingEmails ?? []).map((item) =>
+            sendingIds.has(item.id)
+              ? {
+                  ...item,
+                  busy: true,
+                  draftId: undefined,
+                }
+              : item,
+          )}
           note={opsNotes.outstandingEmails}
           empty="No firm, completion, review, or pre-completion emails due today or earlier."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
+          errors={actionError}
+          renderActions={(item) =>
+            item.busy ? null : (
+              <>
+                <MiniButton
+                  disabled={pendingId === item.id || !item.draftId}
+                  title={item.draftId ? "Queue this draft to the Transaction Bot" : "No draft id on this row"}
+                  onClick={() => void sendOutstanding(item)}
+                >
+                  Send
+                </MiniButton>
+                <MiniButton disabled={pendingId === item.id || !item.sheet} onClick={() => void skipSheetItem(item)}>
+                  Skip
+                </MiniButton>
+              </>
+            )
+          }
         />
 
         <Tile title="Email Drafts">
-          {emailDrafts.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-              <Mail className="size-7 text-[#7395B8]/80" />
-              <p className="text-sm text-muted-foreground">
+          {emailDrafts.filter((item) => !hiddenIds.has(item.id)).length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
+              <Mail className="size-5 text-[#7395B8]/80" />
+              <p className="text-xs text-muted-foreground">
                 Conveyancing / Generate Email drafts appear here after the bot completes them.
               </p>
             </div>
           ) : (
-            <ul className="grid gap-2">
-              {emailDrafts.map((item) => {
-                const open = expandedDraft === item.id;
-                return (
-                  <li
-                    key={item.id}
-                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5"
-                  >
-                    <button
-                      type="button"
-                      className="w-full text-left"
-                      onClick={() =>
-                        setExpandedDraft(open ? null : item.id)
-                      }
+            <ul className="grid gap-1">
+              {emailDrafts
+                .filter((item) => !hiddenIds.has(item.id))
+                .map((item) => (
+                  <li key={item.id}>
+                    <CompactRow
+                      text={item.draftEmail?.subject || "Email draft"}
+                      detail={[
+                        item.draftEmail?.to ? `To ${item.draftEmail.to}` : "",
+                        item.draftEmail?.body ?? "",
+                      ]
+                        .filter(Boolean)
+                        .join("\n")}
+                      expanded={expandedId === item.id}
+                      onToggle={() => toggle(item.id)}
                     >
-                      <p className="text-sm font-medium text-foreground">
-                        {item.draftEmail?.subject}
-                      </p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        To {item.draftEmail?.to} ·{" "}
-                        {new Date(item.createdAt).toLocaleString()}
-                      </p>
-                    </button>
-                    {open ? (
-                      <pre className="mt-2 max-h-36 overflow-y-auto whitespace-pre-wrap rounded-lg bg-black/30 p-2.5 text-xs leading-relaxed text-foreground/90">
-                        {item.draftEmail?.body}
-                      </pre>
+                      {queuedDrafts.has(item.id) ? (
+                        <span className="text-[0.6rem] uppercase tracking-[0.08em] text-emerald-300">Queued</span>
+                      ) : (
+                        <>
+                          <MiniButton disabled={pendingId === item.id} onClick={() => void sendDraft(item)}>
+                            Send
+                          </MiniButton>
+                          <MiniButton disabled={pendingId === item.id} onClick={() => void skipDraft(item)}>
+                            Skip
+                          </MiniButton>
+                        </>
+                      )}
+                    </CompactRow>
+                    {actionError[item.id] ? (
+                      <p className="px-1 pt-0.5 text-[0.65rem] text-amber-200">{actionError[item.id]}</p>
                     ) : null}
                   </li>
-                );
-              })}
+                ))}
             </ul>
           )}
-        </Tile>
-
-        <Tile title="AREG Chat Outbox">
-          <ArtifactList
-            items={chatOutbox}
-            empty="AREG Chat messages land in this Outbox for Work Routine Bot delivery."
-          />
         </Tile>
 
         <Tile title="Marketing Queue">
@@ -393,34 +648,26 @@ export function OpsDashboard() {
           ) : (feeds.openHouse?.rows ?? []).length === 0 ? (
             <EmptyTile message="No current open-house responses." />
           ) : (
-            <>
+            <div className="grid gap-1">
               {feeds.openHouse?.summary ? (
-                <p className="mb-3 rounded-xl border border-[#1F6598]/35 bg-[#1F6598]/15 px-3 py-2.5 text-xs leading-relaxed text-foreground/90">
+                <p className="truncate text-[0.65rem] text-[#7395B8]" title={feeds.openHouse.summary}>
                   {feeds.openHouse.summary}
                 </p>
               ) : null}
-              <ul className="grid gap-2 text-xs">
-                {(feeds.openHouse?.rows ?? []).map((row, index) => (
-                  <li
-                    key={`${row.agent}-${row.window}-${index}`}
-                    className="rounded-xl border border-white/10 bg-black/20 px-3 py-2"
-                  >
-                    <p className="font-medium text-foreground">
-                      {row.agent || "No name"}
-                    </p>
-                    <p className="mt-0.5 text-muted-foreground">
-                      Weekend date · {row.window || "—"}
-                    </p>
-                    <p className="mt-1 text-[#7395B8]">
-                      Sat {row.saturday || "—"} · Sun {row.sunday || "—"}
-                    </p>
-                    {row.notes ? (
-                      <p className="mt-1 text-muted-foreground">{row.notes}</p>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            </>
+              {(feeds.openHouse?.rows ?? []).map((row, index) => {
+                const id = `open-${index}`;
+                const text = `${row.agent || "No name"} · ${row.window || "—"} · Sat ${row.saturday || "—"} · Sun ${row.sunday || "—"}`;
+                return (
+                  <CompactRow
+                    key={id}
+                    text={text}
+                    detail={row.notes || text}
+                    expanded={expandedId === id}
+                    onToggle={() => toggle(id)}
+                  />
+                );
+              })}
+            </div>
           )}
         </Tile>
 
@@ -430,22 +677,25 @@ export function OpsDashboard() {
           live={live}
           items={opsCards?.referralExchange ?? []}
           note={opsNotes.referralExchange}
-          empty="No recent referral assignments."
+          empty="No referral assignments in the last 3 months."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
         />
 
         <Tile title="CINC Call History" botId="cinc" live={live}>
           {cardErrors?.cinc ? (
             <SheetProblem message={cardErrors.cinc} />
-          ) : (feeds.cincAgents ?? []).length === 0 ? (
+          ) : cincGroups.length === 0 ? (
             <EmptyTile message="No CINC rows in the sheet yet." />
           ) : (
             <>
-              <div className="mb-2 flex gap-1">
+              <div className="mb-1 flex gap-1">
                 {(
                   [
-                    ["wtd", "WTD"],
-                    ["mtd", "MTD"],
-                    ["ytd", "YTD"],
+                    ["today", "Today"],
+                    ["week", "Week to date"],
+                    ["year", "Year to date"],
                   ] as const
                 ).map(([id, label]) => (
                   <button
@@ -453,7 +703,7 @@ export function OpsDashboard() {
                     type="button"
                     onClick={() => setCincPeriod(id)}
                     className={cn(
-                      "rounded-md px-2 py-1 text-[0.65rem] font-semibold uppercase tracking-[0.12em] transition",
+                      "rounded px-1.5 py-0.5 text-[0.6rem] font-semibold uppercase tracking-[0.08em] transition",
                       cincPeriod === id
                         ? "bg-[#1F6598]/45 text-foreground"
                         : "text-muted-foreground hover:bg-white/10 hover:text-foreground"
@@ -463,42 +713,12 @@ export function OpsDashboard() {
                   </button>
                 ))}
               </div>
-              <ul className="grid gap-2">
-                {(feeds.cincAgents ?? []).map((agent) => {
-                  const stats = agent[cincPeriod];
+              <ul className="grid gap-1">
+                {cincGroups.map((agent) => {
+                  const line = `${agent.agent} · ${cincLine(agent[cincPeriod])}`;
                   return (
-                    <li
-                      key={agent.id}
-                      className="rounded-xl border border-white/10 bg-black/20 px-2.5 py-2"
-                    >
-                      <div>
-                        <p className="text-sm font-medium text-foreground">
-                          {agent.agent}
-                        </p>
-                        <p className="text-[0.7rem] text-muted-foreground">
-                          Last call · {agent.lastCall}
-                        </p>
-                      </div>
-                      <div className="mt-2 flex justify-between gap-2 text-[0.7rem] text-muted-foreground">
-                        <span>
-                          <span className="block text-base font-medium text-foreground">
-                            {stats.calls}
-                          </span>
-                          Calls
-                        </span>
-                        <span>
-                          <span className="block text-base font-medium text-foreground">
-                            {stats.connected}
-                          </span>
-                          Connected
-                        </span>
-                        <span>
-                          <span className="block text-base font-medium text-foreground">
-                            {stats.appointments}
-                          </span>
-                          Appts
-                        </span>
-                      </div>
+                    <li key={agent.agent} className="truncate text-xs text-foreground" title={line}>
+                      {line}
                     </li>
                   );
                 })}
@@ -514,6 +734,9 @@ export function OpsDashboard() {
           items={opsCards?.clientAnniversaries ?? []}
           note={opsNotes.clientAnniversaries}
           empty="No upcoming anniversaries."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
         />
 
         <OpsSheetCard
@@ -523,6 +746,9 @@ export function OpsDashboard() {
           items={opsCards?.clientBirthdays ?? []}
           note={opsNotes.clientBirthdays}
           empty="No upcoming birthdays."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
         />
 
         <OpsSheetCard
@@ -531,6 +757,9 @@ export function OpsDashboard() {
           items={opsCards?.docusignDrafts ?? []}
           note={opsNotes.docusignDrafts}
           empty="No DocuSign drafts waiting to be sent."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
         />
 
         <OpsSheetCard
@@ -539,6 +768,9 @@ export function OpsDashboard() {
           items={opsCards?.subjectRemovals ?? []}
           note={opsNotes.subjectRemovals}
           empty="No upcoming subject removals."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
         />
 
         <OpsSheetCard
@@ -547,6 +779,9 @@ export function OpsDashboard() {
           items={opsCards?.completionDates ?? []}
           note={opsNotes.completionDates}
           empty="No upcoming completion dates."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
         />
       </div>
     </div>

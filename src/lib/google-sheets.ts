@@ -6,7 +6,9 @@ type ServiceAccount = {
   private_key: string;
 };
 
-type TokenCache = { token: string; expiresAt: number };
+type TokenCache = { token: string; expiresAt: number; scope: string };
+
+const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 
 const tokenGlobal = globalThis as typeof globalThis & {
   __areg_google_token__?: TokenCache;
@@ -69,7 +71,7 @@ async function accessToken(): Promise<{ token: string; email: string }> {
     throw new Error("No Google service account is configured.");
   }
   const cached = tokenGlobal.__areg_google_token__;
-  if (cached && cached.expiresAt > Date.now() + 60_000) {
+  if (cached && cached.scope === SHEETS_SCOPE && cached.expiresAt > Date.now() + 60_000) {
     return { token: cached.token, email: account.client_email };
   }
   const now = Math.floor(Date.now() / 1000);
@@ -77,7 +79,7 @@ async function accessToken(): Promise<{ token: string; email: string }> {
   const payload = base64url(
     JSON.stringify({
       iss: account.client_email,
-      scope: "https://www.googleapis.com/auth/spreadsheets.readonly",
+      scope: SHEETS_SCOPE,
       aud: "https://oauth2.googleapis.com/token",
       iat: now,
       exp: now + 3600,
@@ -111,6 +113,7 @@ async function accessToken(): Promise<{ token: string; email: string }> {
   tokenGlobal.__areg_google_token__ = {
     token: body.access_token,
     expiresAt: Date.now() + 50 * 60 * 1000,
+    scope: SHEETS_SCOPE,
   };
   return { token: body.access_token, email: account.client_email };
 }
@@ -438,6 +441,50 @@ export async function readNamedTabs(
 export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]> {
   const listed = await listSheetProperties(spreadsheetId);
   return batchGetCached(spreadsheetId, listed);
+}
+
+function columnLetter(index: number): string {
+  let n = index + 1;
+  let letters = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
+}
+
+/** Write one cell. This is a Sheets update, not a read, so it does not count toward the read quota. */
+export async function updateSheetCell(
+  spreadsheetId: string,
+  tabTitle: string,
+  rowNumber: number,
+  columnIndex: number,
+  value: string,
+): Promise<void> {
+  const { token, email } = await accessToken();
+  const escaped = tabTitle.replace(/'/g, "''");
+  const range = `'${escaped}'!${columnLetter(columnIndex)}${rowNumber}`;
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const res = await fetch(url, {
+    method: "PUT",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ values: [[value]] }),
+  });
+  if (res.ok) return;
+  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+  const detail = body.error?.message?.trim();
+  let message = detail
+    ? `Google could not update ${tabTitle} (HTTP ${res.status}): ${detail}`
+    : `Google could not update ${tabTitle} (HTTP ${res.status}).`;
+  if (res.status === 403) {
+    message += ` Share the sheet with ${email} as an Editor.`;
+  }
+  throw new GoogleReadError(res.status, message);
 }
 
 export async function readPublicCsv(spreadsheetId: string, gid: number): Promise<string[][]> {

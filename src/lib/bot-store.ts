@@ -10,7 +10,7 @@ import type { BotArtifact } from "@/lib/artifacts";
 import type { EmailDelivery } from "@/lib/bot-email";
 import type { BotTarget } from "@/lib/ops-actions";
 
-export type BotJobStatus = "queued" | "processing" | "done" | "error";
+export type BotJobStatus = "queued" | "processing" | "done" | "error" | "paused" | "cancelled";
 
 export type DraftEmail = {
   to: string;
@@ -30,6 +30,8 @@ export type BotJob = {
   status: BotJobStatus;
   result?: string;
   draftEmail?: DraftEmail;
+  /** Hidden from Email Drafts after Skip. */
+  draftSkipped?: boolean;
   /** Primary: webhook POST to the bot (BOT_*_URL) */
   webhookDelivery?: {
     status: "sent" | "failed" | "not_configured";
@@ -158,6 +160,10 @@ function schedulePersistArtifacts() {
   }, 200);
 }
 
+export async function awaitStoreReady(): Promise<void> {
+  await Promise.all([ensureFeedsLoaded(), ensureJobsLoaded(), ensureArtifactsLoaded()]);
+}
+
 export function ensureFeedLoop() {
   const state = getState();
   void ensureFeedsLoaded();
@@ -193,7 +199,24 @@ export function listJobs(): BotJob[] {
 
 export function listDrafts(): BotJob[] {
   void ensureJobsLoaded();
-  return getState().jobs.filter((job) => job.draftEmail);
+  return getState().jobs.filter((job) => job.draftEmail && !job.draftSkipped);
+}
+
+export async function loadJob(id: string): Promise<BotJob | undefined> {
+  await ensureJobsLoaded();
+  return getState().jobs.find((job) => job.id === id);
+}
+
+export async function skipDraft(id: string): Promise<BotJob | null> {
+  const job = await loadJob(id);
+  if (!job?.draftEmail || job.draftSkipped) return job ?? null;
+  const updated: BotJob = {
+    ...job,
+    draftSkipped: true,
+    updatedAt: new Date().toISOString(),
+  };
+  upsertJob(updated);
+  return updated;
 }
 
 export function listArtifacts(): BotArtifact[] {
