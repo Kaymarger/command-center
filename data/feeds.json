@@ -1,0 +1,16 @@
+{
+  "updatedAt": "2026-10-21T00:00:00.000Z",
+  "source": "empty",
+  "cincAgents": [],
+  "openHouse": {
+    "summary": "",
+    "rows": []
+  },
+  "referrals": {
+    "active": [],
+    "history": []
+  },
+  "anniversaries": [],
+  "birthdays": [],
+  "outstandingEmails": []
+}
