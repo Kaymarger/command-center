@@ -89,7 +89,7 @@ export function BotLivePanel({ botId, botLabel }: BotLivePanelProps) {
                     }
                   >
                     {job.webhookDelivery?.status === "sent"
-                      ? "Sent to bot"
+                      ? "Sent to Bot"
                       : job.webhookDelivery?.status === "failed"
                         ? "Send failed"
                         : job.webhookDelivery?.status === "not_configured"

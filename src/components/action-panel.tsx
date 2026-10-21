@@ -312,7 +312,7 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
             </span>
             <div>
               <p className="font-heading text-lg text-foreground">
-                {sendFailed ? "Job was not sent" : "Sent to bot"}
+                {sendFailed ? "Job was not sent" : "Sent to Bot"}
               </p>
               <p className="mt-1 text-sm text-muted-foreground">{successMessage}</p>
               {webhookDelivery ? (

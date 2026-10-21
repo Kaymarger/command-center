@@ -29,7 +29,7 @@ export function JobsInbox() {
           Job inbox
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Everything entered in the command center and sent to bots ·{" "}
+          Everything entered in the command center and sent to Bots ·{" "}
           <span className={live ? "text-emerald-400" : "text-muted-foreground"}>
             {live ? "live" : "offline"}
           </span>
@@ -108,7 +108,7 @@ export function JobsInbox() {
         {artifacts.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             Documents, deals, DocuSign packs, and chat messages appear here when
-            bots complete work.
+            Bots complete work.
           </p>
         ) : (
           <ul className="grid gap-2 sm:grid-cols-2">

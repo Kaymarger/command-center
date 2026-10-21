@@ -1,10 +1,15 @@
 import {
   emptyFeeds,
+  emptyOpsCards,
   sheetTabs,
   summarizeOpenHouses,
   type LiveFeeds,
+  type OpsCardItem,
+  type OpsCardKey,
+  type OpsCards,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
+import { currentOpenHouseRows } from "@/lib/dashboard-text";
 import { feedsFromSheetTables } from "@/lib/feeds-io";
 import { reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
@@ -19,6 +24,30 @@ import {
   type OpenHouseReadStats,
   type SheetTab,
 } from "@/lib/google-sheets";
+
+/**
+ * AREG Ops tabs, one per dashboard card.
+ * Change `tab` here when the sheet names are confirmed.
+ * `columns` stays null until the headers are confirmed, so the card stays empty
+ * instead of guessing. `upcoming` / `latest` are the row limits those cards will use.
+ */
+export const OPS_CARD_TABS: Record<
+  OpsCardKey,
+  {
+    tab: string;
+    columns: Record<string, string> | null;
+    upcoming?: number;
+    latest?: number;
+  }
+> = {
+  clientAnniversaries: { tab: "Anniversaries", columns: null, upcoming: 10 },
+  clientBirthdays: { tab: "Birthdays", columns: null, upcoming: 10 },
+  referralExchange: { tab: "Referrals", columns: null, latest: 6 },
+  outstandingEmails: { tab: "Outstanding Emails", columns: null },
+  docusignDrafts: { tab: "DocuSign Drafts", columns: null },
+  subjectRemovals: { tab: "Upcoming Subject Removals", columns: null },
+  completionDates: { tab: "Upcoming Completion Dates", columns: null },
+};
 
 const TAB_MATCHES: {
   key: keyof typeof sheetTabs;
@@ -75,6 +104,30 @@ function pickTab(
   return { rows: match.rows, found: true, error: match.error ?? null };
 }
 
+function findOpsTab(tabs: SheetTab[], tabName: string): SheetTab | undefined {
+  const wanted = tabName.trim().toLowerCase();
+  return tabs.find((tab) => tab.title.trim().toLowerCase() === wanted);
+}
+
+/**
+ * Read one configured card. With `columns` still null, filled tabs stay hidden
+ * and the card shows its empty state.
+ */
+export function readOpsCard(tabs: SheetTab[], key: OpsCardKey): OpsCardItem[] {
+  const config = OPS_CARD_TABS[key];
+  const tab = findOpsTab(tabs, config.tab);
+  if (config.columns == null || !tab || tab.error || tab.rows.length <= 1) return [];
+  return [];
+}
+
+export function opsCardsFromTabs(tabs: SheetTab[]): OpsCards {
+  const cards = emptyOpsCards();
+  (Object.keys(OPS_CARD_TABS) as OpsCardKey[]).forEach((key) => {
+    cards[key] = readOpsCard(tabs, key);
+  });
+  return cards;
+}
+
 function missingTabMessage(label: string, titles: string[]): string {
   const found = titles.length ? titles.join(", ") : "none";
   return `The ${label} tab was not found in the dashboard sheet. Tabs Google returned: ${found}.`;
@@ -88,6 +141,7 @@ async function opsTables(): Promise<{
   openHouses: string[][];
   outstandingEmails: string[][];
   cardErrors: SheetCardErrors;
+  tabs: SheetTab[];
 }> {
   const id = opsSheetId();
   if (!id) {
@@ -107,6 +161,7 @@ async function opsTables(): Promise<{
         birthdays: message,
         emails: message,
       },
+      tabs: [],
     };
   }
 
@@ -133,6 +188,7 @@ async function opsTables(): Promise<{
           birthdays: message,
           emails: message,
         },
+        tabs: [],
       };
     }
     const titles = tabs.map((tab) => tab.title);
@@ -170,6 +226,7 @@ async function opsTables(): Promise<{
       openHouses: openHouses.rows,
       outstandingEmails: outstandingEmails.rows,
       cardErrors,
+      tabs,
     };
   }
 
@@ -185,6 +242,7 @@ async function opsTables(): Promise<{
     openHouses,
     outstandingEmails,
     cardErrors: blankCardErrors(),
+    tabs: [],
   };
 }
 
@@ -201,6 +259,7 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
     openHouses: tables.openHouses,
     outstandingEmails: tables.outstandingEmails,
   });
+  feeds.opsCards = opsCardsFromTabs(tables.tabs);
   return { feeds, cardErrors: tables.cardErrors };
 }
 
@@ -298,11 +357,12 @@ export async function loadDashboardFeeds(): Promise<DashboardPayload> {
   } else if ("error" in openHouse) {
     openHouseError = openHouse.error;
   } else {
+    const rows = currentOpenHouseRows(openHouse.rows);
     feeds = {
       ...feeds,
       openHouse: {
-        rows: openHouse.rows,
-        summary: summarizeOpenHouses(openHouse.rows),
+        rows,
+        summary: summarizeOpenHouses(rows),
       },
     };
   }

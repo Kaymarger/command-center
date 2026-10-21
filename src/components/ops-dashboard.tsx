@@ -2,9 +2,9 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import Link from "next/link";
-import { ArrowLeft, ArrowUpRight, Mail, X } from "lucide-react";
+import { ArrowLeft, ArrowUpRight, Mail } from "lucide-react";
 import { artifactKindLabel, type BotArtifact } from "@/lib/artifacts";
-import { bots, type BotId } from "@/lib/dashboard-data";
+import { bots, type BotId, type OpsCardItem } from "@/lib/dashboard-data";
 import { useLiveFeeds } from "@/hooks/use-live-feeds";
 import { DashboardNotepad } from "@/components/dashboard-notepad";
 import { cn } from "@/lib/utils";
@@ -45,7 +45,17 @@ function ArtifactList({
   );
 }
 
-const SKIPPED_KEY = "areg-ops-skipped-emails";
+function SheetLines({ items }: { items: OpsCardItem[] }) {
+  return (
+    <ul className="grid gap-2">
+      {items.map((item) => (
+        <li key={item.id} className="text-sm leading-snug text-foreground">
+          {item.text}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 function EmptyTile({ message }: { message: string }) {
   return (
@@ -138,7 +148,6 @@ export function OpsDashboard() {
     openHouseError,
     cardErrors,
   } = useLiveFeeds();
-  const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [expandedDraft, setExpandedDraft] = useState<string | null>(null);
   const [cincPeriod, setCincPeriod] = useState<"wtd" | "mtd" | "ytd">("wtd");
   const [updatedLabel, setUpdatedLabel] = useState<string>("—");
@@ -152,18 +161,6 @@ export function OpsDashboard() {
     .slice(0, 8);
 
   useEffect(() => {
-    try {
-      setSkipped(
-        new Set(
-          JSON.parse(window.localStorage.getItem(SKIPPED_KEY) ?? "[]") as string[]
-        )
-      );
-    } catch {
-      setSkipped(new Set());
-    }
-  }, []);
-
-  useEffect(() => {
     setUpdatedLabel(
       new Date(feeds.updatedAt).toLocaleTimeString([], {
         hour: "numeric",
@@ -173,18 +170,7 @@ export function OpsDashboard() {
     );
   }, [feeds.updatedAt]);
 
-  const emails = (feeds.outstandingEmails ?? []).filter(
-    (email) => !skipped.has(email.id)
-  );
-
-  function skipEmail(id: string) {
-    setSkipped((prev) => {
-      const next = new Set(prev);
-      next.add(id);
-      window.localStorage.setItem(SKIPPED_KEY, JSON.stringify([...next]));
-      return next;
-    });
-  }
+  const opsCards = feeds.opsCards;
 
   return (
     <div className="relative mx-auto flex w-full max-w-7xl flex-col px-4 pb-16 pt-8 sm:px-6 sm:pt-12">
@@ -202,7 +188,7 @@ export function OpsDashboard() {
             Dashboard
           </h1>
           <p className="mt-1 text-xs text-muted-foreground">
-            Enter work in the command center · bots complete it · {live ? "live" : "offline"} ·{" "}
+            Enter work in the command center · Bots complete it · {live ? "live" : "offline"} ·{" "}
             {updatedLabel}
           </p>
           {error ? (
@@ -231,9 +217,9 @@ export function OpsDashboard() {
       </header>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
-        <Tile title="Sent to bots" live={live}>
+        <Tile title="Sent to Bots" live={live}>
           {recentJobs.length === 0 ? (
-            <EmptyTile message="Jobs you enter in the command center show up here after they’re sent to bots." />
+            <EmptyTile message="Jobs you enter in the command center show up here after they’re sent to Bots." />
           ) : (
             <ul className="grid gap-2">
               {recentJobs.map((job) => (
@@ -257,7 +243,7 @@ export function OpsDashboard() {
                       }
                     >
                       {job.webhookDelivery?.status === "sent"
-                        ? "Sent to bot"
+                        ? "Sent to Bot"
                         : job.webhookDelivery?.status === "failed"
                           ? "Send failed"
                           : job.webhookDelivery?.status === "not_configured"
@@ -321,7 +307,7 @@ export function OpsDashboard() {
         <Tile title="Pipeline">
           <ArtifactList
             items={deals}
-            empty="Listings, offers, accepted/firm/subject removal land here after you send them to bots."
+            empty="Listings, offers, accepted/firm/subject removal land here after you send them to Bots."
           />
         </Tile>
 
@@ -339,23 +325,24 @@ export function OpsDashboard() {
           />
         </Tile>
 
-        <Tile title="AREG Chat outbox">
+        <Tile title="AREG Chat Outbox">
           <ArtifactList
             items={chatOutbox}
-            empty="Message AREG Chat entries queue here for Work Routine bot delivery."
+            empty="AREG Chat messages land in this Outbox for Work Routine Bot delivery."
           />
         </Tile>
 
-        <Tile title="Marketing queue">
+        <Tile title="Marketing Queue">
           <ArtifactList
             items={socialQueue}
-            empty="Social Media and Feature Sheet jobs land here for listings bot."
+            empty="Social Media and Feature Sheet jobs land here for the Listings Bot."
           />
         </Tile>
 
         <Tile title="Important Dates">
           <DashboardNotepad
             storageKey="areg-ops-important-dates"
+            kind="dates"
             placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
           />
         </Tile>
@@ -363,46 +350,16 @@ export function OpsDashboard() {
         <Tile title="To-Do's">
           <DashboardNotepad
             storageKey="areg-ops-todos"
-            placeholder="Brain-dump tasks — follow up Bennett, print feature sheets, book photographer…"
+            kind="todos"
+            placeholder="Brain-dump tasks — follow up | Bennett | the listing"
           />
         </Tile>
 
-        <Tile title="Outstanding Emails">
-          {cardErrors?.emails ? (
-            <SheetProblem message={cardErrors.emails} />
-          ) : emails.length === 0 ? (
-            <EmptyTile message="No outstanding emails in the live sheet." />
+        <Tile title="Outstanding Emails" live={live}>
+          {(opsCards?.outstandingEmails ?? []).length === 0 ? (
+            <EmptyTile message="No accepted-offer, firm, pre-completion, or review emails past their send date." />
           ) : (
-            <ul className="grid gap-2">
-              {emails.map((email) => (
-                <li
-                  key={email.id}
-                  className="rounded-xl border border-white/10 bg-black/20 px-3 py-2.5"
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="text-sm font-medium text-foreground">
-                        {email.label}
-                      </p>
-                      <p className="mt-0.5 text-xs leading-snug text-muted-foreground">
-                        {email.detail}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => skipEmail(email.id)}
-                      className="shrink-0 rounded-md px-1.5 py-1 text-[0.7rem] text-[#7395B8] transition hover:bg-white/10 hover:text-foreground"
-                      title="Skip notification"
-                    >
-                      <span className="inline-flex items-center gap-1">
-                        <X className="size-3" />
-                        Skip
-                      </span>
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
+            <SheetLines items={opsCards.outstandingEmails} />
           )}
         </Tile>
 
@@ -410,7 +367,7 @@ export function OpsDashboard() {
           {openHouseError ? (
             <SheetProblem message={openHouseError} />
           ) : (feeds.openHouse?.rows ?? []).length === 0 ? (
-            <EmptyTile message="No open-house responses yet." />
+            <EmptyTile message="No current open-house responses." />
           ) : (
             <>
               {feeds.openHouse?.summary ? (
@@ -444,43 +401,10 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Referral Exchange" botId="work-routine" live={live}>
-          {cardErrors?.referrals ? (
-            <SheetProblem message={cardErrors.referrals} />
-          ) : (feeds.referrals?.active ?? []).length === 0 &&
-          (feeds.referrals?.history ?? []).length === 0 ? (
-            <EmptyTile message="No referral rows in the sheet yet." />
+          {(opsCards?.referralExchange ?? []).length === 0 ? (
+            <EmptyTile message="No recent referral assignments." />
           ) : (
-            <>
-              <p className="mb-2 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-[#7395B8]">
-                Currently on
-              </p>
-              <ul className="mb-3 grid gap-1.5">
-                {(feeds.referrals?.active ?? []).map((item) => (
-                  <li
-                    key={item.id}
-                    className="rounded-lg bg-black/20 px-2.5 py-2 text-xs"
-                  >
-                    <p className="font-medium text-foreground">{item.name}</p>
-                    <p className="text-muted-foreground">
-                      {item.direction} · {item.meta}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-              <p className="mb-2 text-[0.65rem] font-semibold uppercase tracking-[0.14em] text-[#7395B8]">
-                History
-              </p>
-              <ul className="grid gap-1.5">
-                {(feeds.referrals?.history ?? []).map((item) => (
-                  <li key={item.id} className="text-xs text-muted-foreground">
-                    <span className="text-foreground/90">{item.name}</span>
-                    <span className="mt-0.5 block">
-                      {item.direction} · {item.meta}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </>
+            <SheetLines items={opsCards.referralExchange} />
           )}
         </Tile>
 
@@ -559,56 +483,42 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Client Anniversaries" botId="work-routine" live={live}>
-          {cardErrors?.anniversaries ? (
-            <SheetProblem message={cardErrors.anniversaries} />
-          ) : (feeds.anniversaries ?? []).length === 0 ? (
-            <EmptyTile message="No anniversaries in the sheet yet." />
+          {(opsCards?.clientAnniversaries ?? []).length === 0 ? (
+            <EmptyTile message="No upcoming anniversaries." />
           ) : (
-            <ul className="grid gap-2">
-              {(feeds.anniversaries ?? []).map((item) => (
-                <li
-                  key={item.id}
-                  className="flex items-start justify-between gap-2 border-b border-white/5 pb-2 text-sm last:border-0"
-                >
-                  <span>
-                    <span className="font-medium text-foreground">{item.name}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {item.note}
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-xs text-[#7395B8]">
-                    {item.date}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <SheetLines items={opsCards.clientAnniversaries} />
           )}
         </Tile>
 
         <Tile title="Client Birthdays" botId="work-routine" live={live}>
-          {cardErrors?.birthdays ? (
-            <SheetProblem message={cardErrors.birthdays} />
-          ) : (feeds.birthdays ?? []).length === 0 ? (
-            <EmptyTile message="No birthdays in the sheet yet." />
+          {(opsCards?.clientBirthdays ?? []).length === 0 ? (
+            <EmptyTile message="No upcoming birthdays." />
           ) : (
-            <ul className="grid gap-2">
-              {(feeds.birthdays ?? []).map((item) => (
-                <li
-                  key={item.id}
-                  className="flex items-start justify-between gap-2 border-b border-white/5 pb-2 text-sm last:border-0"
-                >
-                  <span>
-                    <span className="font-medium text-foreground">{item.name}</span>
-                    <span className="mt-0.5 block text-xs text-muted-foreground">
-                      {item.note}
-                    </span>
-                  </span>
-                  <span className="shrink-0 text-xs text-[#7395B8]">
-                    {item.date}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <SheetLines items={opsCards.clientBirthdays} />
+          )}
+        </Tile>
+
+        <Tile title="DocuSign Drafts" live={live}>
+          {(opsCards?.docusignDrafts ?? []).length === 0 ? (
+            <EmptyTile message="No DocuSign drafts waiting to be sent." />
+          ) : (
+            <SheetLines items={opsCards.docusignDrafts} />
+          )}
+        </Tile>
+
+        <Tile title="Upcoming Subject Removals" live={live}>
+          {(opsCards?.subjectRemovals ?? []).length === 0 ? (
+            <EmptyTile message="No upcoming subject removals." />
+          ) : (
+            <SheetLines items={opsCards.subjectRemovals} />
+          )}
+        </Tile>
+
+        <Tile title="Upcoming Completion Dates" live={live}>
+          {(opsCards?.completionDates ?? []).length === 0 ? (
+            <EmptyTile message="No upcoming completion dates." />
+          ) : (
+            <SheetLines items={opsCards.completionDates} />
           )}
         </Tile>
       </div>

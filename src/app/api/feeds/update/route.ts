@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { setFeeds } from "@/lib/bot-store";
 import type { LiveFeeds } from "@/lib/dashboard-data";
-import { summarizeOpenHouses } from "@/lib/dashboard-data";
+import { emptyOpsCards, summarizeOpenHouses } from "@/lib/dashboard-data";
 import { requireUserSession } from "@/lib/ops-guard";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +20,7 @@ export async function PUT(request: Request) {
     birthdays: body.birthdays ?? [],
     referrals: body.referrals ?? { active: [], history: [] },
     outstandingEmails: body.outstandingEmails ?? [],
+    opsCards: body.opsCards ?? emptyOpsCards(),
     openHouse: {
       rows: body.openHouse?.rows ?? [],
       summary:

@@ -31,7 +31,7 @@ export default async function LoginPage({
         </h1>
         <p className="mt-2 text-sm text-muted-foreground">
           Enter the team password to open the command center and send jobs to
-          the bots.
+          the Bots.
         </p>
 
         {setup ? (

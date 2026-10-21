@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useTransition } from "react";
 import { Loader2, Sparkles } from "lucide-react";
+import { importantDateLine, todoSentence } from "@/lib/dashboard-text";
 import { organizeNotes } from "@/lib/organize-notes";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -9,11 +10,13 @@ import { Textarea } from "@/components/ui/textarea";
 type DashboardNotepadProps = {
   storageKey: string;
   placeholder: string;
+  kind: "dates" | "todos";
 };
 
 export function DashboardNotepad({
   storageKey,
   placeholder,
+  kind,
 }: DashboardNotepadProps) {
   const [value, setValue] = useState("");
   const [ready, setReady] = useState(false);
@@ -33,17 +36,34 @@ export function DashboardNotepad({
   function organize() {
     startTransition(async () => {
       await new Promise((r) => setTimeout(r, 280));
-      setValue(organizeNotes(value));
+      setValue(organizeNotes(value, kind));
     });
   }
 
+  const rendered = value
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => (kind === "todos" ? todoSentence(line) : importantDateLine(line)))
+    .filter(Boolean);
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
+      {rendered.length > 0 ? (
+        <ul className="grid min-h-0 flex-1 gap-1.5 overflow-y-auto">
+          {rendered.map((line, index) => (
+            <li key={`${line}-${index}`} className="text-sm leading-snug text-foreground">
+              {line}
+            </li>
+          ))}
+        </ul>
+      ) : null}
       <Textarea
         value={value}
         onChange={(e) => setValue(e.target.value)}
+        onBlur={() => setValue(organizeNotes(value, kind))}
         placeholder={placeholder}
-        className="min-h-0 flex-1 resize-none border-white/10 bg-black/20 text-sm leading-relaxed"
+        className="h-16 shrink-0 resize-none border-white/10 bg-black/20 text-sm leading-relaxed"
       />
       <Button
         type="button"

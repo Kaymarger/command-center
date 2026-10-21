@@ -8,7 +8,7 @@ export type WebhookDelivery = {
 };
 
 const labels: Record<WebhookDelivery["status"], string> = {
-  sent: "Sent to bot",
+  sent: "Sent to Bot",
   failed: "Bot send failed",
   not_configured: "Bot not linked",
 };

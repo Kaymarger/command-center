@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import {
   emptyFeeds,
+  emptyOpsCards,
   summarizeOpenHouses,
   type CincAgentStats,
   type IxactItem,
@@ -22,6 +23,7 @@ export async function readFeedsFile(): Promise<LiveFeeds> {
       ...emptyFeeds(parsed.source ?? "mixed"),
       ...parsed,
       outstandingEmails: parsed.outstandingEmails ?? [],
+      opsCards: parsed.opsCards ?? emptyOpsCards(),
     };
   } catch {
     return emptyFeeds("empty");
@@ -190,6 +192,7 @@ export function feedsFromSheetTables(tables: {
       summary: summarizeOpenHouses(openRows),
     },
     outstandingEmails,
+    opsCards: emptyOpsCards(),
   };
 }
 
@@ -216,6 +219,7 @@ export function mergeWebhookFeeds(
     birthdays: patch.birthdays ?? current.birthdays,
     outstandingEmails:
       patch.outstandingEmails ?? current.outstandingEmails,
+    opsCards: patch.opsCards ?? current.opsCards,
   };
   return next;
 }

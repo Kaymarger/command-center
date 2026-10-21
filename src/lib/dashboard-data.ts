@@ -75,6 +75,34 @@ export type OpenHouseRow = {
   notes?: string;
 };
 
+export type OpsCardKey =
+  | "clientAnniversaries"
+  | "clientBirthdays"
+  | "referralExchange"
+  | "outstandingEmails"
+  | "docusignDrafts"
+  | "subjectRemovals"
+  | "completionDates";
+
+export type OpsCardItem = {
+  id: string;
+  text: string;
+};
+
+export type OpsCards = Record<OpsCardKey, OpsCardItem[]>;
+
+export function emptyOpsCards(): OpsCards {
+  return {
+    clientAnniversaries: [],
+    clientBirthdays: [],
+    referralExchange: [],
+    outstandingEmails: [],
+    docusignDrafts: [],
+    subjectRemovals: [],
+    completionDates: [],
+  };
+}
+
 export type SheetCardErrors = {
   cinc: string | null;
   referrals: string | null;
@@ -92,6 +120,7 @@ export type LiveFeeds = {
   anniversaries: IxactItem[];
   birthdays: IxactItem[];
   outstandingEmails: OutstandingEmail[];
+  opsCards: OpsCards;
 };
 
 export const AREG_OPS_SHEET_ID = process.env.AREG_OPS_SHEET_ID?.trim() ?? "";
@@ -119,6 +148,7 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
     anniversaries: [],
     birthdays: [],
     outstandingEmails: [],
+    opsCards: emptyOpsCards(),
   };
 }
 
@@ -130,7 +160,8 @@ export function feedHasRows(feeds: LiveFeeds): boolean {
     feeds.referrals.history.length > 0 ||
     feeds.anniversaries.length > 0 ||
     feeds.birthdays.length > 0 ||
-    feeds.outstandingEmails.length > 0
+    feeds.outstandingEmails.length > 0 ||
+    Object.values(feeds.opsCards ?? {}).some((items) => items.length > 0)
   );
 }
 
