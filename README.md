@@ -26,6 +26,14 @@ Set these as secret environment variables on the host (Production):
 | `BOT_WORK_ROUTINE_KEY` | Work Routine bot key |
 | `BOT_TRANSACTION_KEY` | Transaction bot key |
 | `AREG_OPS_SHEET_ID` | Dashboard Google Sheet id |
+| `OPEN_HOUSE_SHEET_ID` | Google Form responses sheet for open-house availability |
+| `GOOGLE_SERVICE_ACCOUNT_JSON` | Full JSON key for a Google service account that can read those sheets |
+
+## Dashboard sheets
+
+The dashboard reads `AREG_OPS_SHEET_ID` on each visit. It does not use the copy of `data/feeds.json` in the repo. Open-house availability reads `OPEN_HOUSE_SHEET_ID`, the responses spreadsheet linked to the Google Form.
+
+A private sheet needs `GOOGLE_SERVICE_ACCOUNT_JSON` (the downloaded key file) and the sheet shared with that account’s `client_email` as a Viewer. Tab names the dashboard looks for: CINC, Anniversaries, Birthdays, Referrals, Open Houses, Outstanding Emails.
 
 ## Run locally
 

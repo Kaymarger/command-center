@@ -414,35 +414,42 @@ async function completeListingsJob(
       input.optionPath?.[input.optionPath.length - 1] ?? "Feature sheet";
     const optionId = input.optionIds?.[input.optionIds.length - 1];
     if (optionId === "send-for-printing") {
-      const copies = input.copies ?? 1;
+      const copies =
+        typeof input.copies === "number" && Number.isFinite(input.copies)
+          ? input.copies
+          : undefined;
+      const where = property === "Property" ? "the properties listed" : property;
       return {
         result: sentToComplete(
           "listings",
-          `Print ${copies} copy/copies for: ${property}.`
+          copies
+            ? `Print ${copies} copies for ${where}.`
+            : `Print feature sheets for ${where}.`
         ),
         artifacts: [
           makeArtifact(jobId, {
             kind: "feature-sheet",
-            title: `Print · ${copies}×`,
-            detail: property,
-            property,
+            title: copies ? `Print · ${copies} copies` : "Print feature sheets",
+            detail: property === "Property" ? details || "No property listed" : property,
+            property: property === "Property" ? undefined : property,
             bot: "listings",
             status: "queued",
           }),
         ],
       };
     }
+    const address = property === "Property" ? "no address given" : property;
     return {
       result: sentToComplete(
         "listings",
-        `Feature sheet update for ${property}${details ? `: ${details}` : ""}.`
+        `Feature sheet for ${address}${details ? `: ${details}` : ""}.`
       ),
       artifacts: [
         makeArtifact(jobId, {
           kind: "feature-sheet",
-          title: `${leaf} · ${property}`,
+          title: `${leaf} · ${address}`,
           detail: details || leaf,
-          property,
+          property: property === "Property" ? undefined : property,
           bot: "listings",
           status: "ready",
         }),
@@ -451,12 +458,14 @@ async function completeListingsJob(
   }
 
   if (input.actionId === "social-media") {
-    const channel = input.optionPath?.[0] ?? "Social";
-    const notes = input.primaryValue?.trim() || "Social brief";
+    const channel = input.optionPath?.length
+      ? input.optionPath.join(", ")
+      : "No platform selected";
+    const notes = input.primaryValue?.trim() || "";
     return {
       result: sentToComplete(
         "listings",
-        `${channel} post brief accepted — bot will publish/schedule.`
+        `${channel}${notes ? ` — ${notes}` : ""}.`
       ),
       artifacts: [
         makeArtifact(jobId, {

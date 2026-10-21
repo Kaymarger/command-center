@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import {
   botLabel,
+  socialPlatforms,
   type BotTarget,
   type NestedOption,
   type OpsAction,
@@ -58,7 +59,9 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
   const [detailsText, setDetailsText] = useState("");
   const [secondaryText, setSecondaryText] = useState("");
   const [propertiesText, setPropertiesText] = useState("");
-  const [copiesText, setCopiesText] = useState("1");
+  const [copiesText, setCopiesText] = useState("");
+  const [featureAddress, setFeatureAddress] = useState("");
+  const [platforms, setPlatforms] = useState<string[]>([]);
   const [deliveryMode, setDeliveryMode] = useState<"draft" | "send">("draft");
   const [files, setFiles] = useState<File[]>([]);
   const [agents, setAgents] = useState<AgentRow[]>([]);
@@ -77,7 +80,9 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
     setDetailsText("");
     setSecondaryText("");
     setPropertiesText("");
-    setCopiesText("1");
+    setCopiesText("");
+    setFeatureAddress("");
+    setPlatforms([]);
     setDeliveryMode("draft");
     setFiles([]);
     setAgents([]);
@@ -103,8 +108,11 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
   const needsOther = leafSelected && !!selectedLeaf?.needsOtherText;
   const viewOnly = leafSelected && !!selectedLeaf?.viewOnly;
   const comingSoon = !!action?.comingSoon;
+  const socialMode = action?.id === "social-media";
   const showForm =
-    (!action?.nestedOptions || leafSelected) && !viewOnly && !comingSoon;
+    (socialMode || !action?.nestedOptions || leafSelected) &&
+    !viewOnly &&
+    !comingSoon;
   const openHouseMode = action?.id === "open-houses";
   const addOpens = openHouseMode && selectedLeaf?.id === "add-opens";
   const deleteOpens = openHouseMode && selectedLeaf?.id === "delete-opens";
@@ -169,25 +177,20 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
     const detailsValue = detailsText.trim();
     const notesValue = notesText.trim();
 
-    if (needsOther && !otherText.trim()) return;
-    if (addOpens && !whenText.trim()) return;
-    if (action.detailsField?.required && !detailsValue) return;
-    if (updateFeature && !detailsValue) return;
-    if (printFeature && !propertiesText.trim()) return;
-
-    // Delete opens: no property required — Paragon wipe via transaction bot
-    if (deleteOpens && !primaryValue) {
-      // allow empty property for full Paragon delete
-    } else if (action.primaryField && action.primaryField.required !== false) {
-      if (!deleteOpens && !printFeature && !primaryValue) return;
-    }
+    const platformLabels = socialPlatforms
+      .filter((platform) => platforms.includes(platform.id))
+      .map((platform) => platform.label);
+    const sentPrimary = updateFeature
+      ? featureAddress.trim()
+      : printFeature
+        ? propertiesText.trim()
+        : primaryValue;
 
     startTransition(async () => {
       const summaryParts = [
-        ...optionLabels,
-        primaryValue,
-        printFeature ? `Properties: ${propertiesText.trim()}` : "",
-        printFeature ? `Copies: ${copiesText.trim() || "1"}` : "",
+        ...(socialMode ? platformLabels : optionLabels),
+        sentPrimary,
+        printFeature && copiesText.trim() ? `Number of copies: ${copiesText.trim()}` : "",
         secondaryValue ? `To/Party: ${secondaryValue}` : "",
         detailsValue ? `Details: ${detailsValue}` : "",
         notesValue ? `Notes: ${notesValue}` : "",
@@ -215,15 +218,17 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
             actionId: action.id,
             actionLabel: action.label,
             bot: effectiveBot,
-            summary: summaryParts.join(" · "),
-            optionPath: optionLabels,
-            optionIds: path.map((p) => p.id),
+            summary: summaryParts.join(" · ") || action.label,
+            optionPath: socialMode ? platformLabels : optionLabels,
+            optionIds: socialMode ? platforms : path.map((p) => p.id),
             attachmentNames: files.map((f) => f.name),
-            primaryValue:
-              printFeature ? propertiesText.trim() : primaryValue || "Paragon open houses",
+            primaryValue: sentPrimary || undefined,
             secondaryValue: secondaryValue || undefined,
             detailsValue: detailsValue || notesValue || undefined,
-            copies: printFeature ? Number(copiesText) || 1 : undefined,
+            copies:
+              printFeature && copiesText.trim() && Number.isFinite(Number(copiesText))
+                ? Number(copiesText)
+                : undefined,
             deliveryMode: action.deliveryChoice ? deliveryMode : undefined,
             conveyancingMode,
           }),
@@ -338,7 +343,7 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
           </div>
         ) : (
           <div className="grid gap-4">
-            {action.nestedOptions && !leafSelected ? (
+            {action.nestedOptions && !leafSelected && !socialMode ? (
               <div className="grid gap-2">
                 {path.length > 0 ? (
                   <button
@@ -408,7 +413,7 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                   <p className="text-sm text-[#7395B8]">Loading…</p>
                 ) : agents.length === 0 ? (
                   <p className="rounded-xl border border-dashed border-white/20 px-3 py-6 text-center text-sm text-muted-foreground">
-                    No agents on the board yet. Add opens or sync Google Forms.
+                    No availability yet. It appears here after the open-house form sheet is connected.
                   </p>
                 ) : (
                   <ul className="grid gap-2">
@@ -448,7 +453,40 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                   </p>
                 ) : null}
 
-                {!deleteOpens && !printFeature && action.primaryField ? (
+                {socialMode ? (
+                  <div className="grid gap-2">
+                    <Label>Platforms</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                      {socialPlatforms.map((platform) => {
+                        const selected = platforms.includes(platform.id);
+                        return (
+                          <button
+                            key={platform.id}
+                            type="button"
+                            aria-pressed={selected}
+                            onClick={() =>
+                              setPlatforms((current) =>
+                                current.includes(platform.id)
+                                  ? current.filter((id) => id !== platform.id)
+                                  : [...current, platform.id],
+                              )
+                            }
+                            className={cn(
+                              "rounded-xl border px-3 py-2.5 text-left text-sm font-medium transition",
+                              selected
+                                ? "border-[#7395B8] bg-[#1F6598]/35 text-foreground"
+                                : "border-white/15 bg-white/[0.03] text-muted-foreground hover:border-[#7395B8]/50",
+                            )}
+                          >
+                            {platform.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
+
+                {!deleteOpens && !printFeature && !updateFeature && action.primaryField ? (
                   <div className="grid gap-1.5">
                     <Label htmlFor={`${action.id}-${action.primaryField.name}`}>
                       {action.primaryField.label}
@@ -458,7 +496,6 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                         id={`${action.id}-${action.primaryField.name}`}
                         name={action.primaryField.name}
                         placeholder={action.primaryField.placeholder}
-                        required
                         className="bg-muted/40"
                       />
                     ) : (
@@ -466,7 +503,6 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                         id={`${action.id}-${action.primaryField.name}`}
                         name={action.primaryField.name}
                         placeholder={action.primaryField.placeholder}
-                        required
                         className="h-10 bg-muted/40"
                       />
                     )}
@@ -484,20 +520,18 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                         value={propertiesText}
                         onChange={(e) => setPropertiesText(e.target.value)}
                         placeholder={"123 Main St\n456 Oak Ave\n789 Pine Rd"}
-                        required
                         className="bg-muted/40"
                       />
                     </div>
                     <div className="grid gap-1.5">
-                      <Label htmlFor="print-copies">Copies per property</Label>
+                      <Label htmlFor="print-copies">Number of copies</Label>
                       <Input
                         id="print-copies"
-                        type="number"
-                        min={1}
+                        inputMode="numeric"
                         value={copiesText}
                         onChange={(e) => setCopiesText(e.target.value)}
+                        placeholder="How many copies to print"
                         className="h-10 bg-muted/40"
-                        required
                       />
                     </div>
                   </>
@@ -527,7 +561,6 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                         value={whenText}
                         onChange={(e) => setWhenText(e.target.value)}
                         placeholder="Sat 1–3pm"
-                        required
                         className="h-10 bg-muted/40"
                       />
                     </div>
@@ -545,17 +578,28 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                 ) : null}
 
                 {updateFeature ? (
-                  <div className="grid gap-1.5">
-                    <Label htmlFor="feature-update">What is the update?</Label>
-                    <Textarea
-                      id="feature-update"
-                      value={detailsText}
-                      onChange={(e) => setDetailsText(e.target.value)}
-                      placeholder="Price change, new photos, room sizes, copy edits…"
-                      required
-                      className="bg-muted/40"
-                    />
-                  </div>
+                  <>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="feature-address">Address</Label>
+                      <Input
+                        id="feature-address"
+                        value={featureAddress}
+                        onChange={(e) => setFeatureAddress(e.target.value)}
+                        placeholder="123 Main St, Vancouver"
+                        className="h-10 bg-muted/40"
+                      />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="feature-notes">Notes or instructions</Label>
+                      <Textarea
+                        id="feature-notes"
+                        value={detailsText}
+                        onChange={(e) => setDetailsText(e.target.value)}
+                        placeholder="New sheet, price change, photos, room sizes, anything the bot should know…"
+                        className="bg-muted/40"
+                      />
+                    </div>
+                  </>
                 ) : null}
 
                 {action.detailsField && !updateFeature ? (
@@ -568,7 +612,6 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                       value={detailsText}
                       onChange={(e) => setDetailsText(e.target.value)}
                       placeholder={action.detailsField.placeholder}
-                      required={!!action.detailsField.required}
                       className="bg-muted/40"
                     />
                   </div>
@@ -582,7 +625,6 @@ export function ActionPanel({ action, open, onOpenChange }: ActionPanelProps) {
                       value={otherText}
                       onChange={(e) => setOtherText(e.target.value)}
                       placeholder="Enter details"
-                      required
                       className="h-10 bg-muted/40"
                     />
                   </div>

@@ -29,8 +29,12 @@ export async function readFeedsFile(): Promise<LiveFeeds> {
 }
 
 export async function writeFeedsFile(feeds: LiveFeeds): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-  await fs.writeFile(FEEDS_PATH, JSON.stringify(feeds, null, 2), "utf8");
+  try {
+    await fs.mkdir(DATA_DIR, { recursive: true });
+    await fs.writeFile(FEEDS_PATH, JSON.stringify(feeds, null, 2), "utf8");
+  } catch {
+    // Vercel’s disk is read-only. The dashboard still uses the in-memory copy.
+  }
 }
 
 export function parseCsv(text: string): string[][] {

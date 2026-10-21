@@ -123,7 +123,8 @@ function Tile({
 }
 
 export function OpsDashboard() {
-  const { feeds, drafts, jobs, artifacts, live, error } = useLiveFeeds();
+  const { feeds, drafts, jobs, artifacts, live, error, sheetError, openHouseError } =
+    useLiveFeeds();
   const [skipped, setSkipped] = useState<Set<string>>(new Set());
   const [expandedDraft, setExpandedDraft] = useState<string | null>(null);
   const [cincPeriod, setCincPeriod] = useState<"wtd" | "mtd" | "ytd">("wtd");
@@ -193,6 +194,11 @@ export function OpsDashboard() {
           </p>
           {error ? (
             <p className="mt-1 max-w-xl text-xs text-red-300">{error}</p>
+          ) : null}
+          {sheetError ? (
+            <p className="mt-2 max-w-2xl text-xs leading-relaxed text-amber-200">
+              {sheetError}
+            </p>
           ) : null}
         </div>
         <div className="flex flex-wrap gap-2">
@@ -386,8 +392,13 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Open House Availability" botId="google-forms" live={live}>
+          {openHouseError ? (
+            <p className="text-xs leading-relaxed text-amber-200">{openHouseError}</p>
+          ) : null}
           {(feeds.openHouse?.rows ?? []).length === 0 ? (
-            <EmptyTile message="Open houses you send from the command center land here; Forms bot can add more." />
+            openHouseError ? null : (
+              <EmptyTile message="No open-house responses yet." />
+            )
           ) : (
             <>
               {feeds.openHouse?.summary ? (

@@ -1,27 +1,35 @@
-import { NextResponse } from "next/server";
-import {
-  ensureFeedLoop,
-  reloadFeedsFromDisk,
-} from "@/lib/bot-store";
+import { connection, NextResponse } from "next/server";
+import { loadDashboardFeeds } from "@/lib/sheet-sync";
 import { requireUserSession } from "@/lib/ops-guard";
 
 export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
 
 export async function GET() {
+  await connection();
   const denied = await requireUserSession();
   if (denied) return denied;
 
-  ensureFeedLoop();
-  const feeds = await reloadFeedsFromDisk();
-  return NextResponse.json(feeds, {
-    headers: { "Cache-Control": "no-store" },
-  });
+  const payload = await loadDashboardFeeds();
+  return NextResponse.json(
+    {
+      ...payload.feeds,
+      sheetError: payload.sheetError,
+      openHouseError: payload.openHouseError,
+    },
+    { headers: { "Cache-Control": "no-store" } },
+  );
 }
 
 export async function POST() {
+  await connection();
   const denied = await requireUserSession();
   if (denied) return denied;
 
-  const feeds = await reloadFeedsFromDisk();
-  return NextResponse.json(feeds);
+  const payload = await loadDashboardFeeds();
+  return NextResponse.json({
+    ...payload.feeds,
+    sheetError: payload.sheetError,
+    openHouseError: payload.openHouseError,
+  });
 }

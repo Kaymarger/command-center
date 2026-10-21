@@ -70,6 +70,17 @@ export type OpsAction = {
   successHint: string;
 };
 
+export const socialPlatforms = [
+  { id: "instagram", label: "Instagram" },
+  { id: "facebook", label: "Facebook" },
+  { id: "youtube", label: "YouTube" },
+  { id: "tiktok", label: "TikTok" },
+  { id: "linkedin", label: "LinkedIn" },
+  { id: "rental-blog", label: "Rental Blog" },
+  { id: "real-estate-blog", label: "Real Estate Blog" },
+  { id: "google-business", label: "Google Business" },
+] as const;
+
 export const MAILCHIMP_URL =
   process.env.NEXT_PUBLIC_MAILCHIMP_URL ?? "https://login.mailchimp.com/";
 
@@ -185,7 +196,6 @@ export const opsActions: OpsAction[] = [
     detailsField: {
       label: "Details",
       placeholder: "Parties, dates, special instructions, anything the bot needs…",
-      required: true,
     },
     successHint: "Document request sent to transaction bot.",
   },
@@ -237,8 +247,8 @@ export const opsActions: OpsAction[] = [
     icon: LayoutTemplate,
     bot: "listings",
     nestedOptions: [
-      { id: "update-feature-sheets", label: "Update Feature Sheets" },
-      { id: "send-for-printing", label: "Send for Printing" },
+      { id: "update-feature-sheets", label: "New / Update Feature Sheet" },
+      { id: "send-for-printing", label: "Print / Send for Printing" },
     ],
     primaryField: {
       name: "property",
@@ -328,15 +338,9 @@ export const opsActions: OpsAction[] = [
   {
     id: "social-media",
     label: "Social Media",
-    description: "Choose a channel and prep content.",
+    description: "Choose one or more platforms and add notes. Nothing is required.",
     icon: Share2,
     bot: "listings",
-    nestedOptions: [
-      { id: "instagram", label: "Instagram" },
-      { id: "rental-blog", label: "Rental Blog" },
-      { id: "real-estate-blog", label: "Real Estate Blog" },
-      { id: "google-business", label: "Google Business" },
-    ],
     primaryField: {
       name: "notes",
       label: "Topic / notes",

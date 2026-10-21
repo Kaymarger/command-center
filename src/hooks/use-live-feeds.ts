@@ -12,6 +12,8 @@ export function useLiveFeeds() {
   const [artifacts, setArtifacts] = useState<BotArtifact[]>([]);
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [sheetError, setSheetError] = useState<string | null>(null);
+  const [openHouseError, setOpenHouseError] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
@@ -28,7 +30,10 @@ export function useLiveFeeds() {
           fetch("/api/bots/artifacts", { cache: "no-store" }),
         ]);
         if (!feedsRes.ok) throw new Error(`Feed ${feedsRes.status}`);
-        const feedsData = (await feedsRes.json()) as LiveFeeds;
+        const feedsData = (await feedsRes.json()) as LiveFeeds & {
+          sheetError?: string | null;
+          openHouseError?: string | null;
+        };
         const draftsData = draftsRes.ok
           ? ((await draftsRes.json()) as { drafts: BotJob[] })
           : { drafts: [] };
@@ -40,6 +45,8 @@ export function useLiveFeeds() {
           : { artifacts: [] };
         if (!cancelled) {
           setFeeds({ ...emptyFeeds(), ...feedsData });
+          setSheetError(feedsData.sheetError ?? null);
+          setOpenHouseError(feedsData.openHouseError ?? null);
           setDrafts(draftsData.drafts ?? []);
           setJobs(jobsData.jobs ?? []);
           setArtifacts(artifactsData.artifacts ?? []);
@@ -123,6 +130,8 @@ export function useLiveFeeds() {
     artifacts,
     live,
     error,
+    sheetError,
+    openHouseError,
     syncing,
     syncFromSheet,
   };
