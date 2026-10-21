@@ -191,9 +191,13 @@ export function OpsDashboard() {
   const [cincPeriod, setCincPeriod] = useState<"wtd" | "mtd" | "ytd">("wtd");
   const [updatedLabel, setUpdatedLabel] = useState<string>("—");
   const recentJobs = jobs.slice(0, 8);
-  const deals = artifacts.filter((a) => a.kind === "deal" || a.kind === "listing").slice(0, 8);
-  const documents = artifacts.filter((a) => a.kind === "document").slice(0, 8);
-  const docusign = artifacts.filter((a) => a.kind === "docusign").slice(0, 8);
+  const emailDrafts = [...drafts]
+    .sort(
+      (a, b) =>
+        Date.parse(b.createdAt || b.updatedAt || "") -
+        Date.parse(a.createdAt || a.updatedAt || ""),
+    )
+    .slice(0, 10);
   const chatOutbox = artifacts.filter((a) => a.kind === "chat").slice(0, 8);
   const socialQueue = artifacts
     .filter((a) => a.kind === "social" || a.kind === "feature-sheet")
@@ -300,8 +304,25 @@ export function OpsDashboard() {
           )}
         </Tile>
 
-        <Tile title="Draft Email">
-          {drafts.length === 0 ? (
+        <OpsSheetCard
+          title="To-Do's"
+          live={live}
+          items={opsCards?.todos ?? []}
+          note={opsNotes.todos}
+          empty="No open to-dos."
+        />
+
+        <OpsSheetCard
+          title="Outstanding Emails"
+          live={live}
+          comingUp
+          items={opsCards?.outstandingEmails ?? []}
+          note={opsNotes.outstandingEmails}
+          empty="No firm, completion, review, or pre-completion emails due today or earlier."
+        />
+
+        <Tile title="Email Drafts">
+          {emailDrafts.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
               <Mail className="size-7 text-[#7395B8]/80" />
               <p className="text-sm text-muted-foreground">
@@ -310,7 +331,7 @@ export function OpsDashboard() {
             </div>
           ) : (
             <ul className="grid gap-2">
-              {drafts.map((item) => {
+              {emailDrafts.map((item) => {
                 const open = expandedDraft === item.id;
                 return (
                   <li
@@ -344,27 +365,6 @@ export function OpsDashboard() {
           )}
         </Tile>
 
-        <Tile title="Pipeline">
-          <ArtifactList
-            items={deals}
-            empty="Listings, offers, accepted/firm/subject removal land here after you send them to Bots."
-          />
-        </Tile>
-
-        <Tile title="Documents">
-          <ArtifactList
-            items={documents}
-            empty="Generate Document requests appear here when the transaction bot completes them."
-          />
-        </Tile>
-
-        <Tile title="DocuSign">
-          <ArtifactList
-            items={docusign}
-            empty="Send via DocuSign packs show here once queued for signature."
-          />
-        </Tile>
-
         <Tile title="AREG Chat Outbox">
           <ArtifactList
             items={chatOutbox}
@@ -386,23 +386,6 @@ export function OpsDashboard() {
             placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
           />
         </Tile>
-
-        <OpsSheetCard
-          title="To-Do's"
-          live={live}
-          items={opsCards?.todos ?? []}
-          note={opsNotes.todos}
-          empty="No open to-dos."
-        />
-
-        <OpsSheetCard
-          title="Outstanding Emails"
-          live={live}
-          comingUp
-          items={opsCards?.outstandingEmails ?? []}
-          note={opsNotes.outstandingEmails}
-          empty="No firm, completion, review, or pre-completion emails due today or earlier."
-        />
 
         <Tile title="Open House Availability" botId="google-forms" live={live}>
           {openHouseError ? (
