@@ -15,14 +15,20 @@ import {
   dateColumnPresent,
   dealItems,
   dealsFromDateSheet,
+  EMAIL_DRAFT_SHEET_HEADERS,
   EMAIL_DRAFTS_TAB,
   findNamedTab,
   FIRM_TODO_TAB,
   GBP_TAB,
+  GOOGLE_BUSINESS_HEADERS,
+  GOOGLE_BUSINESS_QUEUE_TAB,
   GOOGLE_BUSINESS_TAB,
   mergeKeyDeals,
+  openDealAddressKeys,
   OPS_CARD_TABS,
   opsCardsFromTabs,
+  removableDocusignRows,
+  removableOpenHouseRows,
   sheetDataRowCount,
   sheetTabMatches,
   sortScheduledOpenHouseItems,
@@ -32,6 +38,8 @@ import {
 import { feedsFromSheetTables } from "@/lib/feeds-io";
 import { awaitStoreReady, listDrafts, reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
+  deleteSheetRows,
+  ensureSheetTab,
   FORM_RESPONSES_TAB,
   formResponsesTab,
   isQuotaError,
@@ -163,6 +171,7 @@ function opsWantedTabs(): WantedTab[] {
     { title: "CINC Call History" },
     { title: EMAIL_DRAFTS_TAB },
     { title: "Email Drafts" },
+    { title: GOOGLE_BUSINESS_QUEUE_TAB },
     { title: GOOGLE_BUSINESS_TAB },
     { title: GBP_TAB },
   ];
@@ -196,6 +205,41 @@ function pickTab(
   return { rows: match.rows, found: true, error: match.error ?? null };
 }
 
+async function ensureDashboardTabs(spreadsheetId: string): Promise<string | null> {
+  try {
+    await ensureSheetTab(spreadsheetId, GOOGLE_BUSINESS_QUEUE_TAB, GOOGLE_BUSINESS_HEADERS);
+    await ensureSheetTab(spreadsheetId, EMAIL_DRAFTS_TAB, EMAIL_DRAFT_SHEET_HEADERS);
+    return null;
+  } catch (error) {
+    if (isQuotaError(error)) throw error;
+    return error instanceof Error ? error.message : "A dashboard tab could not be created.";
+  }
+}
+
+/** Drop the DocuSign test draft and leftover blank OpenHouses rows. */
+async function pruneLeftoverRows(spreadsheetId: string, tabs: SheetTab[]): Promise<string | null> {
+  const problems: string[] = [];
+  for (const tab of tabs) {
+    if (tab.missing || tab.error || tab.sheetId == null || tab.sheetId < 0) continue;
+    const rows = sheetTabMatches(tab.title, OPS_CARD_TABS.docusignDrafts.tab)
+      ? removableDocusignRows(tab.rows)
+      : sheetTabMatches(tab.title, OPS_CARD_TABS.scheduledOpenHouses.tab)
+        ? removableOpenHouseRows(tab.rows)
+        : [];
+    if (!rows.length) continue;
+    try {
+      await deleteSheetRows(spreadsheetId, tab.sheetId, rows);
+      [...rows].sort((a, b) => b - a).forEach((row) => {
+        if (row >= 1 && row <= tab.rows.length) tab.rows.splice(row - 1, 1);
+      });
+    } catch (error) {
+      if (isQuotaError(error)) throw error;
+      problems.push(error instanceof Error ? error.message : `Could not clean ${tab.title}.`);
+    }
+  }
+  return problems.length ? problems.join(" ") : null;
+}
+
 async function opsTables(): Promise<{
   cinc: string[][];
   anniversaries: string[][];
@@ -205,6 +249,7 @@ async function opsTables(): Promise<{
   outstandingEmails: string[][];
   cardErrors: SheetCardErrors;
   tabs: SheetTab[];
+  setupError: string | null;
 }> {
   const id = opsSheetId();
   if (!id) {
@@ -225,13 +270,18 @@ async function opsTables(): Promise<{
         emails: message,
       },
       tabs: [],
+      setupError: null,
     };
   }
 
   if (loadServiceAccount()) {
     let tabs: SheetTab[] = [];
+    let setupError: string | null = null;
     try {
+      setupError = await ensureDashboardTabs(id);
       tabs = await readNamedTabs(id, opsWantedTabs(), { discoverMissing: true });
+      const pruneError = await pruneLeftoverRows(id, tabs);
+      setupError = [setupError, pruneError].filter(Boolean).join(" ") || null;
     } catch (error) {
       if (isQuotaError(error)) throw error;
       const message =
@@ -253,6 +303,7 @@ async function opsTables(): Promise<{
           emails: message,
         },
         tabs: [],
+        setupError: null,
       };
     }
     const cinc = pickTab(tabs, sheetTabs.CINC, ["cinc"]);
@@ -280,6 +331,7 @@ async function opsTables(): Promise<{
       outstandingEmails: outstandingEmails.rows,
       cardErrors,
       tabs,
+      setupError,
     };
   }
 
@@ -296,6 +348,7 @@ async function opsTables(): Promise<{
     outstandingEmails,
     cardErrors: blankCardErrors(),
     tabs: [],
+    setupError: null,
   };
 }
 
@@ -325,6 +378,24 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
   feeds.opsCards = built.cards;
   feeds.opsCardNotes = built.notes;
   feeds.sheetEmailDrafts = built.sheetEmailDrafts;
+  feeds.importantDates = built.importantDates;
+  if (tables.setupError) {
+    const parts = tables.setupError.split(/(?<=\.)\s+/);
+    const take = (pattern: RegExp) => parts.filter((part) => pattern.test(part)).join(" ");
+    const google = take(/GoogleBusiness/i);
+    const email = take(/EmailDrafts/i);
+    const removed = take(/delete that row/i);
+    if (google) {
+      feeds.opsCardNotes.googleBusiness = [feeds.opsCardNotes.googleBusiness, google].filter(Boolean).join(" ");
+    }
+    if (email) feeds.emailDraftNote = email;
+    if (removed) {
+      feeds.opsCardNotes.scheduledOpenHouses = [feeds.opsCardNotes.scheduledOpenHouses, removed]
+        .filter(Boolean)
+        .join(" ");
+      feeds.opsCardNotes.docusignDrafts = [feeds.opsCardNotes.docusignDrafts, removed].filter(Boolean).join(" ");
+    }
+  }
   const cincTab = bestCincTab(tables.tabs);
   const cincRows = cincTab && sheetDataRowCount(cincTab.rows) > 0 ? cincTab.rows : tables.cinc;
   const cincTitle = cincTab?.title || "CINC";
@@ -597,7 +668,11 @@ function parsedForOpsTab(title: string, feeds: LiveFeeds): number {
     return cards.scheduledOpenHouses?.length ?? 0;
   }
   if (sheetTabMatches(title, EMAIL_DRAFTS_TAB)) return feeds.sheetEmailDrafts?.length ?? 0;
-  if (sheetTabMatches(title, GOOGLE_BUSINESS_TAB) || sheetTabMatches(title, GBP_TAB)) {
+  if (
+    sheetTabMatches(title, GOOGLE_BUSINESS_QUEUE_TAB) ||
+    sheetTabMatches(title, GOOGLE_BUSINESS_TAB) ||
+    sheetTabMatches(title, GBP_TAB)
+  ) {
     return cards.googleBusiness?.length ?? 0;
   }
   if (/cinc/i.test(title)) return feeds.cincGroups?.length ?? 0;
@@ -762,6 +837,11 @@ async function buildPayload(): Promise<DashboardPayload> {
 
   const transactions = await readTransactionsSheet(today);
   const keyDates = findNamedTab(opsTabs, OPS_CARD_TABS.completionDates.tab);
+  const openDeals = keyDates && !keyDates.error ? openDealAddressKeys(keyDates.rows, today) : null;
+  const firmItems = transactions.items.map((item) => ({
+    ...item,
+    stale: Boolean(item.stale || (openDeals && item.dealKey && !openDeals.has(item.dealKey))),
+  }));
   const completionItems = dealItems(
     mergeKeyDeals([
       keyDates ? dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title) : [],
@@ -775,7 +855,7 @@ async function buildPayload(): Promise<DashboardPayload> {
     ...feeds,
     opsCards: {
       ...feeds.opsCards,
-      todos: [...(feeds.opsCards?.todos ?? []), ...transactions.items],
+      todos: [...(feeds.opsCards?.todos ?? []), ...firmItems],
       completionDates: completionItems,
     },
     opsCardNotes: {

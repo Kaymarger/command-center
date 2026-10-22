@@ -2,7 +2,7 @@ import { connection, NextResponse } from "next/server";
 import { skipDraft, loadJob } from "@/lib/bot-store";
 import { dispatchToBot, signalExistingJob } from "@/lib/bots/runtime";
 import { calendarDateFromCell, calendarToday } from "@/lib/dashboard-text";
-import { appendSheetRow, ensureSheetTab, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
+import { appendSheetRow, deleteSheetRow, ensureSheetTab, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
 import type { BotTarget } from "@/lib/ops-actions";
 import {
   botIdFromSheet,
@@ -421,13 +421,22 @@ export async function POST(request: Request) {
           { status: 502 },
         );
       }
-      await writeCell({
-        spreadsheet: "ops",
-        tab: String(body.tab ?? OPS_CARD_TABS.scheduledOpenHouses.tab),
-        row: body.row,
-        column: body.column,
-        value: deleting ? "deleted" : "cancelled",
-      });
+      const tab = String(body.tab ?? OPS_CARD_TABS.scheduledOpenHouses.tab);
+      if (deleting) {
+        const sheetId = opsSheetId();
+        if (!sheetId) throw new Error("AREG_OPS_SHEET_ID is not set, so the open house was not deleted.");
+        const row = Number(body.row);
+        if (!Number.isInteger(row) || row < 2) throw new Error("That row is not on the sheet.");
+        await deleteSheetRow(sheetId, tab, row);
+      } else {
+        await writeCell({
+          spreadsheet: "ops",
+          tab,
+          row: body.row,
+          column: body.column,
+          value: "cancelled",
+        });
+      }
       if (body.itemId) patchCachedOpsItem(body.itemId, null);
       return NextResponse.json({ ok: true, job });
     }

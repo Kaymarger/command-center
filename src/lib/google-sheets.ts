@@ -631,6 +631,68 @@ export async function ensureSheetTab(
   );
 }
 
+/** Delete whole sheet rows. Row numbers are 1-based. The header row is never deleted. */
+export async function deleteSheetRows(
+  spreadsheetId: string,
+  sheetId: number,
+  rowNumbers: number[],
+): Promise<void> {
+  const unique = [...new Set(rowNumbers)]
+    .filter((row) => Number.isInteger(row) && row >= 2)
+    .sort((a, b) => b - a);
+  if (!unique.length) return;
+  if (!Number.isInteger(sheetId) || sheetId < 0) {
+    throw new GoogleReadError(400, "That tab could not be updated.");
+  }
+  const { token, email } = await accessToken();
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const res = await fetch(url, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      requests: unique.map((row) => ({
+        deleteDimension: {
+          range: {
+            sheetId,
+            dimension: "ROWS",
+            startIndex: row - 1,
+            endIndex: row,
+          },
+        },
+      })),
+    }),
+  });
+  if (res.ok) {
+    invalidateSpreadsheet(spreadsheetId);
+    return;
+  }
+  const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
+  const detail = body.error?.message?.trim();
+  let message = detail
+    ? `Google could not delete that row (HTTP ${res.status}): ${detail}`
+    : `Google could not delete that row (HTTP ${res.status}).`;
+  if (res.status === 403) message += ` Share the sheet with ${email} as an Editor.`;
+  throw new GoogleReadError(res.status, message);
+}
+
+/** Delete one data row by tab title. */
+export async function deleteSheetRow(
+  spreadsheetId: string,
+  tabTitle: string,
+  rowNumber: number,
+): Promise<void> {
+  const listed = await listSheetTitles(spreadsheetId);
+  const found = listed.find((tab) => sameTitle(tab.title, tabTitle));
+  if (!found) {
+    throw new GoogleReadError(404, `Google could not find the ${tabTitle} tab.`);
+  }
+  await deleteSheetRows(spreadsheetId, found.sheetId, [rowNumber]);
+}
+
 export async function readPublicCsv(spreadsheetId: string, gid: number): Promise<string[][]> {
   const url = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=csv&gid=${gid}`;
   const res = await fetch(url, { cache: "no-store", redirect: "follow" });

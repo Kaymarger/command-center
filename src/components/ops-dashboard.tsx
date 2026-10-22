@@ -332,6 +332,7 @@ export function OpsDashboard() {
     address: "",
     ownerBot: "",
   });
+  const [showAllTodos, setShowAllTodos] = useState(false);
   const [addingOpenHouse, setAddingOpenHouse] = useState(false);
   const [openHouseDraft, setOpenHouseDraft] = useState({
     address: "",
@@ -668,15 +669,24 @@ export function OpsDashboard() {
         <OpsSheetCard
           title="To-Do's"
           live={live}
-          items={opsCards?.todos ?? []}
+          items={(opsCards?.todos ?? []).filter((item) => showAllTodos || !item.stale)}
           note={opsNotes.todos}
-          empty="No open to-dos."
+          empty={showAllTodos ? "No to-dos." : "No open to-dos from the last 30 days."}
           expandedId={expandedId}
           onToggle={toggle}
           hidden={hiddenIds}
           errors={actionError}
           extra={
-            addingTodo ? (
+            <>
+              <div className="mb-1">
+                <MiniButton
+                  label={showAllTodos ? "Show current to-dos" : "Show all to-dos"}
+                  onClick={() => setShowAllTodos((current) => !current)}
+                >
+                  {showAllTodos ? "Show current" : "Show all"}
+                </MiniButton>
+              </div>
+              {addingTodo ? (
               <form className="mb-1 grid gap-1" onSubmit={(event) => void addTodo(event)}>
                 <input
                   type="date"
@@ -733,7 +743,8 @@ export function OpsDashboard() {
               <div className="mb-1">
                 <MiniButton label="Add to-do" onClick={() => setAddingTodo(true)}>Add</MiniButton>
               </div>
-            )
+            )}
+            </>
           }
           renderActions={(item) =>
             item.sheet ? (
@@ -782,6 +793,11 @@ export function OpsDashboard() {
         />
 
         <Tile title="Email Drafts">
+          {feeds.emailDraftNote ? (
+            <div className="mb-1">
+              <SheetProblem message={feeds.emailDraftNote} />
+            </div>
+          ) : null}
           {emailDraftLines.filter((item) => !hiddenIds.has(item.id)).length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
               <Mail className="size-5 text-[#7395B8]/80" />
@@ -836,6 +852,11 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Marketing Queue">
+          {opsNotes.googleBusiness ? (
+            <div className="mb-1">
+              <SheetProblem message={opsNotes.googleBusiness} />
+            </div>
+          ) : null}
           {socialQueue.length === 0 && (opsCards?.googleBusiness ?? []).length === 0 ? (
             <EmptyTile message="Social Media, Feature Sheet, and Google Business jobs land here for the Listings Bot." />
           ) : (
@@ -852,11 +873,27 @@ export function OpsDashboard() {
         </Tile>
 
         <Tile title="Important Dates">
-          <DashboardNotepad
-            storageKey="areg-ops-important-dates"
-            kind="dates"
-            placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
-          />
+          <div className="flex flex-col gap-2">
+            {(feeds.importantDates ?? []).length > 0 ? (
+              <ul className="grid gap-1">
+                {(feeds.importantDates ?? []).map((group) => (
+                  <li key={group.label}>
+                    <p className="text-[0.65rem] font-semibold text-[#7395B8]">{group.label}</p>
+                    {group.notes.map((note, index) => (
+                      <p key={`${group.label}-${index}`} title={note} className="truncate text-xs leading-snug text-foreground">
+                        {note}
+                      </p>
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <DashboardNotepad
+              storageKey="areg-ops-important-dates"
+              kind="dates"
+              placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
+            />
+          </div>
         </Tile>
 
         <OpsSheetCard

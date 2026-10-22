@@ -85,7 +85,24 @@ export const SCHEDULED_OPEN_HOUSE_HEADERS = [
 
 export const FIRM_TODO_TAB = "Firm Transactions To Dos";
 export const EMAIL_DRAFTS_TAB = "EmailDrafts";
+export const EMAIL_DRAFT_SHEET_HEADERS = [
+  "subject",
+  "body",
+  "to",
+  "status",
+  "created_at",
+  "bot",
+  "draft_id",
+] as const;
 export const GOOGLE_BUSINESS_TAB = "Google Business Profile";
+export const GOOGLE_BUSINESS_QUEUE_TAB = "GoogleBusiness";
+export const GOOGLE_BUSINESS_HEADERS = [
+  "scheduled_date",
+  "type",
+  "text",
+  "status",
+  "created_at",
+] as const;
 export const GBP_TAB = "GBP";
 /** The transactions spreadsheet is titled this. A tab with the same name is read when it exists. */
 export const SR_CLOSING_TAB = "Copy of SR & Closing Dates";
@@ -345,6 +362,25 @@ export function botIdFromSheet(value: string): string {
   return "";
 }
 
+/** "subject_removal" → "Subject Removal". Underscores become spaces, then each word is title case. */
+export function humanizeType(value: string): string {
+  const cleaned = value.trim().replace(/_+/g, " ").replace(/\s+/g, " ");
+  if (!cleaned) return "";
+  return cleaned
+    .split(" ")
+    .map((word) => (word ? word.charAt(0).toUpperCase() + word.slice(1).toLowerCase() : ""))
+    .join(" ");
+}
+
+function citesNotaryWatch(record: Record<string, string>): boolean {
+  return Object.values(record).some((value) => /notary_watch/i.test(value));
+}
+
+function isForestHillsTest(record: Record<string, string>, rawRow: string[]): boolean {
+  const blob = [...Object.values(record), ...rawRow].join(" ");
+  return /931\s*forest\s*hills/i.test(blob) && /\btest\b/i.test(blob);
+}
+
 function draftRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS.docusignDrafts.tab): OpsCardItem[] {
   const located = locateRows(rows, ["address", "status"]);
   return located.items
@@ -359,7 +395,14 @@ function draftRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TAB
       bot: field(record, "bot"),
       created: calendarDateFromCell(field(record, "created_at"), today.year),
     }))
-    .filter((row) => row.address && /^draft$/i.test(row.status.trim()))
+    .filter((row) => row.address && /^draft$/i.test(row.status.trim()) && !isForestHillsTest(
+      {
+        address: row.address,
+        envelope_type: row.type,
+        envelope_subject: row.subject,
+      },
+      [row.address, row.type, row.subject],
+    ))
     .sort((a, b) =>
       compareCalendarDays(
         b.created ?? { year: 0, month: 1, day: 1 },
@@ -367,7 +410,7 @@ function draftRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TAB
       ),
     )
     .map((row) => {
-      const type = row.type || "DocuSign";
+      const type = humanizeType(row.type) || "DocuSign";
       const text = `${type} - ${shortAddress(row.address)}`;
       const detail = [row.address, row.signers, row.subject, row.requestedBy ? `requested by ${row.requestedBy}` : ""]
         .filter(Boolean)
@@ -535,9 +578,16 @@ export function subjectRemovalRows(
       note: field(entry.record, "note", "notes"),
       sourceEmail: field(entry.record, "source_email_date"),
       date: calendarDateFromCell(field(entry.record, "subject_removal_date", "subject_removal"), today.year),
+      notaryWatch: citesNotaryWatch(entry.record),
     }))
     .filter((row): row is typeof row & { date: CalendarDay } =>
-      Boolean(row.address && row.date && row.status !== "removed" && compareCalendarDays(row.date, today) >= 0),
+      Boolean(
+        row.address &&
+          row.date &&
+          !row.notaryWatch &&
+          row.status !== "removed" &&
+          compareCalendarDays(row.date, today) >= 0,
+      ),
     )
     .sort((a, b) => compareCalendarDays(a.date, b.date) || a.address.localeCompare(b.address))
     .map((row) => {
@@ -556,6 +606,108 @@ export function subjectRemovalRows(
       return item(`subject-${row.rowNumber}`, text, { detail });
     });
   return { items, recognized: true };
+}
+
+const KEY_DATE_KINDS: { aliases: string[]; label: string }[] = [
+  { aliases: ["subject_removal_date", "subject_removal", "sr_date", "sr"], label: "Subject removal" },
+  { aliases: ["completion_date", "completion", "closing_date", "closing"], label: "Completion" },
+  { aliases: ["possession_date", "possession"], label: "Possession" },
+];
+
+function keyDateTable(rows: string[][]): { headerAt: number; headers: string[] } | null {
+  if (!rows.length) return null;
+  const headerAt = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    return headers.some((header) => ADDRESS_HEADERS.includes(header));
+  });
+  if (headerAt < 0) return null;
+  return { headerAt, headers: (rows[headerAt] ?? []).map(normHeader) };
+}
+
+/**
+ * Addresses on KeyDates that still have a subject, completion, or possession
+ * date within the last 30 days or later. Null when the tab has no date columns.
+ * A deal missing from this set is treated as closed.
+ */
+export function openDealAddressKeys(rows: string[][], today: CalendarDay): Set<string> | null {
+  const table = keyDateTable(rows);
+  if (!table) return null;
+  const kinds = KEY_DATE_KINDS.map((kind) => table.headers.find((header) => kind.aliases.includes(header))).filter(
+    (key): key is string => Boolean(key),
+  );
+  if (!kinds.length) return null;
+  const cutoff = addCalendarDays(today, -30);
+  const keys = new Set<string>();
+  rows.slice(table.headerAt + 1).forEach((row) => {
+    const record: Record<string, string> = {};
+    table.headers.forEach((key, column) => {
+      if (key) record[key] = (row[column] ?? "").trim();
+    });
+    const address = field(record, ...ADDRESS_HEADERS);
+    const key = addressKey(address);
+    if (!key) return;
+    const dates = kinds
+      .map((header) => calendarDateFromCell(record[header] ?? "", today.year))
+      .filter((day): day is CalendarDay => Boolean(day));
+    if (!dates.length || dates.some((day) => compareCalendarDays(day, cutoff) >= 0)) keys.add(key);
+  });
+  return keys;
+}
+
+/** KeyDates addresses whose dates are all more than 30 days ago. */
+export function closedDealAddressKeys(rows: string[][], today: CalendarDay): Set<string> | null {
+  const open = openDealAddressKeys(rows, today);
+  const table = keyDateTable(rows);
+  if (!open || !table) return null;
+  const closed = new Set<string>();
+  rows.slice(table.headerAt + 1).forEach((row) => {
+    const record: Record<string, string> = {};
+    table.headers.forEach((key, column) => {
+      if (key) record[key] = (row[column] ?? "").trim();
+    });
+    const key = addressKey(field(record, ...ADDRESS_HEADERS));
+    if (key && !open.has(key)) closed.add(key);
+  });
+  return closed;
+}
+
+/** Upcoming KeyDates, soonest day first, one group per day. */
+export function importantDatesFromKeySheet(
+  rows: string[][],
+  today: CalendarDay,
+): { label: string; notes: string[] }[] {
+  const table = keyDateTable(rows);
+  if (!table) return [];
+  const kinds = KEY_DATE_KINDS.flatMap((kind) => {
+    const key = table.headers.find((header) => kind.aliases.includes(header));
+    return key ? [{ key, label: kind.label }] : [];
+  });
+  if (!kinds.length) return [];
+  const dated: { day: CalendarDay; note: string }[] = [];
+  rows.slice(table.headerAt + 1).forEach((row) => {
+    const record: Record<string, string> = {};
+    table.headers.forEach((key, column) => {
+      if (key) record[key] = (row[column] ?? "").trim();
+    });
+    if (!Object.values(record).some(Boolean)) return;
+    const address = field(record, ...ADDRESS_HEADERS);
+    if (!address) return;
+    kinds.forEach((kind) => {
+      const day = calendarDateFromCell(record[kind.key] ?? "", today.year);
+      if (!day || compareCalendarDays(day, today) < 0) return;
+      const who = [field(record, "side"), field(record, "agent", "agent_1")].filter(Boolean).join(", ");
+      dated.push({ day, note: [address, kind.label, who].filter(Boolean).join(" · ") });
+    });
+  });
+  dated.sort((a, b) => compareCalendarDays(a.day, b.day) || a.note.localeCompare(b.note));
+  const groups: { label: string; notes: string[] }[] = [];
+  dated.forEach((entry) => {
+    const label = formatLongDate(entry.day);
+    const last = groups[groups.length - 1];
+    if (last?.label === label) last.notes.push(entry.note);
+    else groups.push({ label, notes: [entry.note] });
+  });
+  return groups;
 }
 
 export function dealItems(deals: KeyDeal[], kind: "subject" | "completion"): OpsCardItem[] {
@@ -585,7 +737,13 @@ export function todoSentenceFromSheet(
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
 }
 
-function todoRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS.todos.tab): OpsCardItem[] {
+function todoRows(
+  rows: string[][],
+  today: CalendarDay,
+  tabTitle = OPS_CARD_TABS.todos.tab,
+  closedDeals: Set<string> | null = null,
+): OpsCardItem[] {
+  const cutoff = addCalendarDays(today, -30);
   const located = locateRows(rows, ["item"]);
   return located.items
     .map(({ rowNumber, record }) => ({
@@ -595,7 +753,7 @@ function todoRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS
       status: field(record, "status"),
       due: firstCalendarDate(field(record, "due_date"), today.year),
     }))
-    .filter((row) => row.task && !closedStatus(row.status))
+    .filter((row) => row.task)
     .sort((a, b) => {
       if (a.due && b.due) return compareCalendarDays(a.due, b.due);
       if (a.due) return -1;
@@ -604,8 +762,16 @@ function todoRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS
     })
     .map((row) => {
       const text = todoSentenceFromSheet(row.task, row.address, row.due);
+      const dealKey = addressKey(row.address);
+      const dealClosed = Boolean(closedDeals && dealKey && closedDeals.has(dealKey));
+      const stale =
+        closedStatus(row.status) ||
+        dealClosed ||
+        (row.due != null && compareCalendarDays(row.due, cutoff) < 0);
       return item(`todo-${row.rowNumber}`, text, {
         detail: text,
+        stale,
+        dealKey: dealKey || undefined,
         skipValue: "skipped",
         sheet: cellRef("ops", tabTitle, row.rowNumber, located.columns.status),
       });
@@ -613,7 +779,10 @@ function todoRows(rows: string[][], today: CalendarDay, tabTitle = OPS_CARD_TABS
     .filter((row) => row.text);
 }
 
-export function transactionChecklistItems(rows: string[][]): OpsCardItem[] {
+export function transactionChecklistItems(
+  rows: string[][],
+  openDeals: Set<string> | null = null,
+): OpsCardItem[] {
   const located = locateRows(rows, ["transactions", "client_name"]);
   const items: OpsCardItem[] = [];
   located.items.forEach(({ rowNumber, record }) => {
@@ -624,12 +793,16 @@ export function transactionChecklistItems(rows: string[][]): OpsCardItem[] {
         ? `${property} (${client})`
         : property || client;
     if (!who) return;
+    const dealKey = addressKey(property || client);
+    const stale = Boolean(openDeals && dealKey && !openDeals.has(dealKey));
     FIRM_CHECKS.forEach((check) => {
       if ((record[check.column] ?? "").trim()) return;
       const text = check.sentence(who);
       items.push(
         item(`firm-${rowNumber}-${check.column}`, text, {
           detail: text,
+          stale,
+          dealKey: dealKey || undefined,
           skipValue: "n/a",
           sheet: cellRef("transactions", FIRM_TODO_TAB, rowNumber, located.columns[check.column]),
         }),
@@ -745,6 +918,56 @@ export function todoHeaderColumns(rows: string[][]): Record<string, number> | nu
   const located = locateRows(rows, ["item"]);
   if (located.columns.item == null) return null;
   return located.columns;
+}
+
+function googleBusinessQueueHeader(rows: string[][]): number {
+  return rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    return (
+      headers.includes("scheduled_date") &&
+      headers.includes("text") &&
+      headers.includes("status")
+    );
+  });
+}
+
+/** Queued rows on the GoogleBusiness tab. Other statuses stay off the card. */
+export function googleBusinessQueueRows(rows: string[][], today: CalendarDay, tabTitle: string): OpsCardItem[] {
+  const headerAt = googleBusinessQueueHeader(rows);
+  if (headerAt < 0) return [];
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  return rows
+    .slice(headerAt + 1)
+    .map((row, offset) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return { rowNumber: headerAt + 2 + offset, record };
+    })
+    .filter((entry) => Object.values(entry.record).some(Boolean))
+    .map((entry) => ({
+      rowNumber: entry.rowNumber,
+      status: field(entry.record, "status"),
+      type: field(entry.record, "type"),
+      text: field(entry.record, "text"),
+      scheduled: calendarDateFromCell(field(entry.record, "scheduled_date"), today.year),
+    }))
+    .filter((row) => /^queued$/i.test(row.status.trim()) && (row.text || row.type))
+    .sort((a, b) => {
+      if (a.scheduled && b.scheduled) return compareCalendarDays(a.scheduled, b.scheduled);
+      if (a.scheduled) return -1;
+      if (b.scheduled) return 1;
+      return a.rowNumber - b.rowNumber;
+    })
+    .map((row) => {
+      const kind = humanizeType(row.type);
+      const when = row.scheduled ? formatLongDate(row.scheduled) : "";
+      const line = [when, kind, row.text].filter(Boolean).join(" · ");
+      return item(`gbp-${tabTitle}-${row.rowNumber}`, `Google Business · ${line}`, {
+        detail: [tabTitle, when, kind, row.text, row.status].filter(Boolean).join(" · "),
+      });
+    });
 }
 
 function googleBusinessRows(rows: string[][], tabTitle: string): OpsCardItem[] {
@@ -1044,7 +1267,7 @@ export function scheduledOpenHouseRows(
       const start = formatClock(row.start);
       const end = formatClock(row.end);
       const time = start && end ? `${start}–${end}` : start || end;
-      const place = row.address ? shortAddress(row.address) || row.address : "";
+      const place = row.address.trim();
       const text = [row.date ? formatLongDate(row.date) : "", time, place, row.host].filter(Boolean).join(" · ");
       const detail = [row.address, time, row.host ? `Host ${row.host}` : "", row.notes].filter(Boolean).join(" · ");
       return item(`open-house-${row.rowNumber}`, text || "Open house", {
@@ -1070,6 +1293,57 @@ export function sortScheduledOpenHouseItems(items: OpsCardItem[]): OpsCardItem[]
   return [...items].sort((a, b) => rank(a) - rank(b) || a.text.localeCompare(b.text));
 }
 
+function headerRecordRows(rows: string[][], headerAt: number): { rowNumber: number; record: Record<string, string>; raw: string[] }[] {
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  return rows.slice(headerAt + 1).map((raw, offset) => {
+    const record: Record<string, string> = {};
+    headers.forEach((key, column) => {
+      if (key) record[key] = (raw[column] ?? "").trim();
+    });
+    return { rowNumber: headerAt + 2 + offset, record, raw };
+  });
+}
+
+/** Sheet rows for the leftover DocuSign test draft, so the dashboard can delete them. */
+export function removableDocusignRows(rows: string[][]): number[] {
+  if (!rows.length) return [];
+  const headerAt = headerIndex(rows, ["address", "status"]);
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  if (!headers.includes("address")) return [];
+  return headerRecordRows(rows, headerAt)
+    .filter((entry) => isForestHillsTest(entry.record, entry.raw))
+    .map((entry) => entry.rowNumber);
+}
+
+/**
+ * OpenHouses rows left behind by a status write: fully blank except a leftover
+ * cell, or status deleted. Cancelled rows stay.
+ */
+export function removableOpenHouseRows(rows: string[][]): number[] {
+  if (!rows.length) return [];
+  const headerAt = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    return headers.some((header) => ADDRESS_HEADERS.includes(header) || header === "date" || header === "status");
+  });
+  if (headerAt < 0) return [];
+  return headerRecordRows(rows, headerAt)
+    .filter((entry) => entry.raw.some((cell) => cell.trim()))
+    .filter((entry) => {
+      const status = field(entry.record, "status");
+      if (/^deleted$/i.test(status)) return true;
+      const meaningful = [
+        field(entry.record, ...ADDRESS_HEADERS),
+        field(entry.record, "date", "open_house_date"),
+        field(entry.record, "start_time", "start"),
+        field(entry.record, "end_time", "end"),
+        field(entry.record, "host_agent", "host", "hosting_agent", "agent"),
+        field(entry.record, "notes", "note"),
+      ].some(Boolean);
+      return !meaningful;
+    })
+    .map((entry) => entry.rowNumber);
+}
+
 function unparsedAnnualNote(title: string, rows: string[][], parsed: number): string | null {
   if (parsed > 0) return null;
   const dataRows = sheetDataRowCount(rows);
@@ -1086,6 +1360,7 @@ export function opsCardsFromTabs(
   sheetEmailDrafts: OpsCardItem[];
   todoColumns: Record<string, number> | null;
   openHouseColumns: Record<string, number> | null;
+  importantDates: { label: string; notes: string[] }[];
 } {
   const notes: Partial<Record<OpsCardKey, string>> = {};
   const cards = emptyOpsCards();
@@ -1093,9 +1368,11 @@ export function opsCardsFromTabs(
     (Object.keys(cards) as OpsCardKey[]).forEach((key) => {
       notes[key] = options.sheetError ?? "";
     });
-    return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null };
+    return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null, importantDates: [] };
   }
-  if (tabs.length === 0) return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null };
+  if (tabs.length === 0) {
+    return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null, importantDates: [] };
+  }
 
   const today = options?.today ?? calendarToday();
   const anniversaries = loadedTab(tabs, OPS_CARD_TABS.clientAnniversaries.tab, notes, "clientAnniversaries");
@@ -1108,8 +1385,10 @@ export function opsCardsFromTabs(
   const todos = loadedTab(tabs, OPS_CARD_TABS.todos.tab, notes, "todos");
   const openHouses = loadedTab(tabs, OPS_CARD_TABS.scheduledOpenHouses.tab, notes, "scheduledOpenHouses");
   const emailDrafts = findNamedTab(tabs, EMAIL_DRAFTS_TAB);
+  const googleBusinessQueue = findNamedTab(tabs, GOOGLE_BUSINESS_QUEUE_TAB);
   const googleBusiness = findNamedTab(tabs, GOOGLE_BUSINESS_TAB);
   const gbp = findNamedTab(tabs, GBP_TAB);
+  const closedDeals = keyDates ? closedDealAddressKeys(keyDates.rows, today) : null;
 
   if (anniversaries) {
     cards.clientAnniversaries = annualRows(anniversaries.rows, today, 10, "anniversary");
@@ -1124,6 +1403,7 @@ export function opsCardsFromTabs(
   if (referrals) cards.referralExchange = referralRows(referrals.rows, today);
   if (emails) cards.outstandingEmails = emailRows(emails.rows, today, emails.title);
   if (drafts) cards.docusignDrafts = draftRows(drafts.rows, today, drafts.title);
+  const importantDates = keyDates ? importantDatesFromKeySheet(keyDates.rows, today) : [];
   if (keyDates) {
     cards.completionDates = dealItems(
       dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title),
@@ -1144,7 +1424,7 @@ export function opsCardsFromTabs(
   } else if (!notes.subjectRemovals) {
     notes.subjectRemovals = `No data in ${OPS_CARD_TABS.subjectRemovals.tab}.`;
   }
-  if (todos) cards.todos = todoRows(todos.rows, today, todos.title);
+  if (todos) cards.todos = todoRows(todos.rows, today, todos.title, closedDeals);
   let openHouseColumns: Record<string, number> | null = null;
   if (openHouses) {
     const scheduled = scheduledOpenHouseRows(openHouses.rows, today, openHouses.title);
@@ -1154,11 +1434,29 @@ export function opsCardsFromTabs(
       notes.scheduledOpenHouses = `${openHouses.title} has ${sheetDataRowCount(openHouses.rows)} rows, but none are upcoming open houses.`;
     }
   }
+  const queueTitles = new Set<string>();
+  const queued =
+    googleBusinessQueue && !googleBusinessQueue.error && googleBusinessQueueHeader(googleBusinessQueue.rows) >= 0
+      ? googleBusinessQueueRows(googleBusinessQueue.rows, today, googleBusinessQueue.title)
+      : [];
+  if (queued.length || (googleBusinessQueue && googleBusinessQueueHeader(googleBusinessQueue.rows) >= 0)) {
+    queueTitles.add(googleBusinessQueue?.title.toLowerCase() ?? "");
+  }
+  const looseTabs = [googleBusinessQueue, googleBusiness, gbp].filter((tab): tab is SheetTab =>
+    Boolean(tab && !tab.error && !queueTitles.has(tab.title.toLowerCase())),
+  );
+  const seenLoose = new Set<string>();
   const gbpRows = [
-    ...(googleBusiness && !googleBusiness.error ? googleBusinessRows(googleBusiness.rows, googleBusiness.title) : []),
-    ...(gbp && !gbp.error && !sheetTabMatches(gbp.title, googleBusiness?.title ?? "")
-      ? googleBusinessRows(gbp.rows, gbp.title)
-      : []),
+    ...queued,
+    ...looseTabs.flatMap((tab) => {
+      const key = tab.title.toLowerCase();
+      if (seenLoose.has(key)) return [];
+      seenLoose.add(key);
+      if (googleBusinessQueueHeader(tab.rows) >= 0) {
+        return googleBusinessQueueRows(tab.rows, today, tab.title);
+      }
+      return googleBusinessRows(tab.rows, tab.title);
+    }),
   ];
   cards.googleBusiness = gbpRows;
   const sheetEmailDrafts =
@@ -1169,5 +1467,6 @@ export function opsCardsFromTabs(
     sheetEmailDrafts,
     todoColumns: todos ? todoHeaderColumns(todos.rows) : null,
     openHouseColumns,
+    importantDates,
   };
 }

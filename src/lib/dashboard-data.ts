@@ -115,6 +115,10 @@ export type OpsCardItem = {
   bot?: string;
   /** ISO time used to sort email drafts. */
   createdAt?: string;
+  /** Hidden on To-Do's until Show all. Older than 30 days, or the deal is closed. */
+  stale?: boolean;
+  /** Address key used to tell whether a checklist row's deal is still open. */
+  dealKey?: string;
 };
 
 export type CincCount = { label: string; value: number };
@@ -167,6 +171,10 @@ export type LiveFeeds = {
   cincNote?: string;
   /** Email drafts read from an EmailDrafts tab, newest first. */
   sheetEmailDrafts?: OpsCardItem[];
+  /** KeyDates rows, soonest day first. */
+  importantDates?: { label: string; notes: string[] }[];
+  /** Shown on Email Drafts when the EmailDrafts tab could not be created. */
+  emailDraftNote?: string;
 };
 
 export const AREG_OPS_SHEET_ID = process.env.AREG_OPS_SHEET_ID?.trim() ?? "";
@@ -202,6 +210,8 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
     opsCardNotes: {},
     cincNote: "",
     sheetEmailDrafts: [],
+    importantDates: [],
+    emailDraftNote: "",
   };
 }
 
@@ -215,6 +225,7 @@ export function feedHasRows(feeds: LiveFeeds): boolean {
     feeds.anniversaries.length > 0 ||
     feeds.birthdays.length > 0 ||
     feeds.outstandingEmails.length > 0 ||
+    (feeds.importantDates?.length ?? 0) > 0 ||
     Object.values(feeds.opsCards ?? {}).some((items) => items.length > 0)
   );
 }

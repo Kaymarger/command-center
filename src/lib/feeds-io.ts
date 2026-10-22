@@ -28,6 +28,8 @@ export async function readFeedsFile(): Promise<LiveFeeds> {
       cincGroups: parsed.cincGroups ?? [],
       cincNote: parsed.cincNote ?? "",
       sheetEmailDrafts: parsed.sheetEmailDrafts ?? [],
+      importantDates: parsed.importantDates ?? [],
+      emailDraftNote: parsed.emailDraftNote ?? "",
     };
   } catch {
     return emptyFeeds("empty");
