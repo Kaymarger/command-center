@@ -2,8 +2,7 @@
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import Link from "next/link";
-import { ArrowLeft, ArrowUpRight, Mail } from "lucide-react";
-import { artifactKindLabel, type BotArtifact } from "@/lib/artifacts";
+import { ArrowLeft, ArrowUpRight } from "lucide-react";
 import { botLabel } from "@/lib/ops-actions";
 import type { BotJob } from "@/lib/bot-store";
 import {
@@ -16,36 +15,6 @@ import {
 import { useLiveFeeds } from "@/hooks/use-live-feeds";
 import { DashboardNotepad } from "@/components/dashboard-notepad";
 import { cn } from "@/lib/utils";
-
-function ArtifactList({
-  items,
-  empty,
-}: {
-  items: BotArtifact[];
-  empty: string;
-}) {
-  if (items.length === 0) {
-    return <EmptyTile message={empty} />;
-  }
-  return (
-    <ul className="grid gap-1">
-      {items.map((item) => (
-        <li
-          key={item.id}
-          className="truncate rounded-md border border-white/10 bg-black/20 px-1.5 py-1 text-xs text-foreground"
-          title={[item.title, item.detail, item.property].filter(Boolean).join(" · ")}
-        >
-          <span className="font-medium">{item.title}</span>
-          <span className="text-muted-foreground">
-            {" "}
-            · {item.status}
-            {item.property ? ` · ${item.property}` : ""} · {artifactKindLabel(item.kind)}
-          </span>
-        </li>
-      ))}
-    </ul>
-  );
-}
 
 function MiniButton({
   children,
@@ -263,12 +232,12 @@ function Tile({
   return (
     <section
       className={cn(
-        "flex max-h-[13rem] min-h-[6.25rem] flex-col overflow-hidden rounded-xl border border-[#7395B8]/30 bg-white/[0.06] p-2 backdrop-blur-xl",
+        "flex max-h-[7.25rem] min-h-[3.75rem] flex-col overflow-hidden rounded-xl border border-[#7395B8]/30 bg-white/[0.06] p-1.5 backdrop-blur-xl",
         className
       )}
     >
-      <div className="mb-1 flex shrink-0 flex-wrap items-start justify-between gap-1">
-        <h2 className="font-heading text-sm tracking-tight text-foreground">
+      <div className="mb-0.5 flex shrink-0 flex-wrap items-start justify-between gap-1">
+        <h2 className="font-heading text-xs tracking-tight text-foreground">
           {title}
         </h2>
         <div className="flex flex-col items-end gap-1">
@@ -307,9 +276,7 @@ function cincLine(counts: CincGroup["week"]): string {
 export function OpsDashboard() {
   const {
     feeds,
-    drafts,
     jobs,
-    artifacts,
     live,
     error,
     sheetError,
@@ -332,7 +299,6 @@ export function OpsDashboard() {
     address: "",
     ownerBot: "",
   });
-  const [showAllTodos, setShowAllTodos] = useState(false);
   const [addingOpenHouse, setAddingOpenHouse] = useState(false);
   const [openHouseDraft, setOpenHouseDraft] = useState({
     address: "",
@@ -347,40 +313,7 @@ export function OpsDashboard() {
     if (override && override.updatedAt >= job.updatedAt) return override;
     return job;
   });
-  const sheetDrafts = feeds.sheetEmailDrafts ?? [];
-  const emailDraftLines = [
-    ...drafts.map((job) => ({
-      id: job.id,
-      kind: "job" as const,
-      text: job.draftEmail?.subject || "Email draft",
-      detail: [job.draftEmail?.to ? `To ${job.draftEmail.to}` : "", job.draftEmail?.body ?? ""]
-        .filter(Boolean)
-        .join("\n"),
-      createdAt: job.createdAt || job.updatedAt || "",
-      dedupe: `${(job.draftEmail?.subject || "").trim().toLowerCase()}|${(job.draftEmail?.to || "").trim().toLowerCase()}`,
-      job,
-      sheet: undefined as OpsCardItem | undefined,
-    })),
-    ...sheetDrafts.map((item) => ({
-      id: item.id,
-      kind: "sheet" as const,
-      text: item.text || "Email draft",
-      detail: item.detail || item.text,
-      createdAt: item.createdAt || "",
-      dedupe: `${item.text.trim().toLowerCase()}|${(item.detail?.match(/^To\s+([^\n]+)/)?.[1] ?? "").trim().toLowerCase()}`,
-      job: undefined as BotJob | undefined,
-      sheet: item,
-    })),
-  ]
-    .sort((a, b) => Date.parse(b.createdAt || "") - Date.parse(a.createdAt || ""))
-    .filter((line, index, all) => {
-      if (!line.dedupe || line.dedupe === "|") return true;
-      return all.findIndex((other) => other.dedupe === line.dedupe) === index;
-    })
-    .slice(0, 10);
-  const socialQueue = artifacts
-    .filter((a) => a.kind === "social" || a.kind === "feature-sheet")
-    .slice(0, 8);
+  const emailDraftLines = (feeds.sheetEmailDrafts ?? []).slice(0, 10);
 
   useEffect(() => {
     setUpdatedLabel(
@@ -669,23 +602,15 @@ export function OpsDashboard() {
         <OpsSheetCard
           title="To-Do's"
           live={live}
-          items={(opsCards?.todos ?? []).filter((item) => showAllTodos || !item.stale)}
+          items={opsCards?.todos ?? []}
           note={opsNotes.todos}
-          empty={showAllTodos ? "No to-dos." : "No open to-dos from the last 30 days."}
+          empty="No to-dos."
           expandedId={expandedId}
           onToggle={toggle}
           hidden={hiddenIds}
           errors={actionError}
           extra={
             <>
-              <div className="mb-1">
-                <MiniButton
-                  label={showAllTodos ? "Show current to-dos" : "Show all to-dos"}
-                  onClick={() => setShowAllTodos((current) => !current)}
-                >
-                  {showAllTodos ? "Show current" : "Show all"}
-                </MiniButton>
-              </div>
               {addingTodo ? (
               <form className="mb-1 grid gap-1" onSubmit={(event) => void addTodo(event)}>
                 <input
@@ -794,123 +719,69 @@ export function OpsDashboard() {
 
         <Tile title="Email Drafts">
           {feeds.emailDraftNote ? (
-            <div className="mb-1">
+            <div className="mb-0.5">
               <SheetProblem message={feeds.emailDraftNote} />
             </div>
           ) : null}
-          {emailDraftLines.filter((item) => !hiddenIds.has(item.id)).length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center gap-1 text-center">
-              <Mail className="size-5 text-[#7395B8]/80" />
-              <p className="text-xs text-muted-foreground">
-                No drafts in the job list or the EmailDrafts tab.
-              </p>
-            </div>
+          {emailDraftLines.length === 0 ? (
+            <p className="text-xs text-muted-foreground">No email drafts.</p>
           ) : (
-            <ul className="grid gap-1">
-              {emailDraftLines
-                .filter((item) => !hiddenIds.has(item.id))
-                .map((item) => (
-                  <li key={item.id}>
-                    <CompactRow
-                      text={item.text}
-                      detail={item.detail}
-                      expanded={expandedId === item.id}
-                      onToggle={() => toggle(item.id)}
-                    >
-                      {item.kind === "job" && item.job && queuedDrafts.has(item.id) ? (
-                        <span className="text-[0.6rem] uppercase tracking-[0.08em] text-emerald-300">Queued</span>
-                      ) : item.kind === "job" && item.job ? (
-                        <>
-                          <MiniButton disabled={pendingId === item.id} onClick={() => void sendDraft(item.job as BotJob)}>
-                            Send
-                          </MiniButton>
-                          <MiniButton disabled={pendingId === item.id} onClick={() => void skipDraft(item.job as BotJob)}>
-                            Skip
-                          </MiniButton>
-                        </>
-                      ) : item.sheet ? (
-                        <>
-                          <MiniButton disabled={pendingId === item.id} onClick={() => void sendSheetDraft(item.sheet as OpsCardItem)}>
-                            Send
-                          </MiniButton>
-                          <MiniButton
-                            disabled={pendingId === item.id || !item.sheet.sheet}
-                            onClick={() => void skipSheetDraft(item.sheet as OpsCardItem)}
-                          >
-                            Skip
-                          </MiniButton>
-                        </>
-                      ) : null}
-                    </CompactRow>
-                    {actionError[item.id] ? (
-                      <p className="px-1 pt-0.5 text-[0.65rem] text-amber-200">{actionError[item.id]}</p>
-                    ) : null}
-                  </li>
-                ))}
+            <ul className="grid gap-0.5">
+              {emailDraftLines.map((item) => (
+                <li key={item.id} title={item.detail || item.text} className="truncate text-xs text-foreground">
+                  {item.href ? (
+                    <a href={item.href} target="_blank" rel="noreferrer" className="hover:underline">
+                      {item.text}
+                    </a>
+                  ) : (
+                    item.text
+                  )}
+                </li>
+              ))}
             </ul>
           )}
         </Tile>
 
         <Tile title="Marketing Queue">
           {opsNotes.googleBusiness ? (
-            <div className="mb-1">
+            <div className="mb-0.5">
               <SheetProblem message={opsNotes.googleBusiness} />
             </div>
           ) : null}
-          {socialQueue.length === 0 && (opsCards?.googleBusiness ?? []).length === 0 ? (
-            <EmptyTile message="Social Media, Feature Sheet, and Google Business jobs land here for the Listings Bot." />
+          {(opsCards?.googleBusiness ?? []).length === 0 ? (
+            <EmptyTile message="Nothing scheduled." />
           ) : (
-            <div className="grid gap-1">
-              {socialQueue.length > 0 ? <ArtifactList items={socialQueue} empty="" /> : null}
-              <SheetLines
-                items={opsCards?.googleBusiness ?? []}
-                expandedId={expandedId}
-                onToggle={toggle}
-                hidden={hiddenIds}
-              />
-            </div>
+            <SheetLines
+              items={opsCards?.googleBusiness ?? []}
+              expandedId={expandedId}
+              onToggle={toggle}
+              hidden={hiddenIds}
+            />
           )}
         </Tile>
 
         <Tile title="Important Dates">
-          <div className="flex flex-col gap-2">
-            {(feeds.importantDates ?? []).length > 0 ? (
-              <ul className="grid gap-1">
-                {(feeds.importantDates ?? []).map((group) => (
-                  <li key={group.label}>
-                    <p className="text-[0.65rem] font-semibold text-[#7395B8]">{group.label}</p>
-                    {group.notes.map((note, index) => (
-                      <p key={`${group.label}-${index}`} title={note} className="truncate text-xs leading-snug text-foreground">
-                        {note}
-                      </p>
-                    ))}
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            <DashboardNotepad
-              storageKey="areg-ops-important-dates"
-              kind="dates"
-              placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
-              onSave={async (text) => {
-                try {
-                  const res = await fetch("/api/dashboard/action", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ type: "save-important-dates", text }),
-                  });
-                  const data = (await res.json()) as { ok?: boolean; error?: string; saved?: number };
-                  if (!res.ok || !data.ok) {
-                    return { ok: false, message: data.error || "That did not work." };
-                  }
-                  if (!data.saved) return { ok: true, message: "Those dates are already on KeyDates." };
-                  return { ok: true, message: "" };
-                } catch (err) {
-                  return { ok: false, message: err instanceof Error ? err.message : "That did not work." };
+          <DashboardNotepad
+            storageKey="areg-ops-important-dates"
+            draft={feeds.importantDatesDraft ?? ""}
+            placeholder="Apr 22 Okada anniversary, 5/4 listing expires…"
+            onSave={async (text) => {
+              try {
+                const res = await fetch("/api/dashboard/action", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ type: "save-important-dates", text }),
+                });
+                const data = (await res.json()) as { ok?: boolean; error?: string };
+                if (!res.ok || !data.ok) {
+                  return { ok: false, message: data.error || "That did not save." };
                 }
-              }}
-            />
-          </div>
+                return { ok: true, message: "" };
+              } catch (err) {
+                return { ok: false, message: err instanceof Error ? err.message : "That did not save." };
+              }
+            }}
+          />
         </Tile>
 
         <OpsSheetCard
@@ -1150,16 +1021,24 @@ export function OpsDashboard() {
           hidden={hiddenIds}
         />
 
-        <OpsSheetCard
-          title="Upcoming Completion Dates"
-          live={live}
-          items={opsCards?.completionDates ?? []}
-          note={opsNotes.completionDates}
-          empty="No upcoming completion dates."
-          expandedId={expandedId}
-          onToggle={toggle}
-          hidden={hiddenIds}
-        />
+        <Tile title="Upcoming Transaction Dates" live={live}>
+          {opsNotes.completionDates && (feeds.transactionDates ?? []).length === 0 ? (
+            <div className="mb-0.5">
+              <SheetProblem message={opsNotes.completionDates} />
+            </div>
+          ) : null}
+          {(feeds.transactionDates ?? []).length === 0 && !opsNotes.completionDates ? (
+            <EmptyTile message="No upcoming transaction dates." />
+          ) : (feeds.transactionDates ?? []).length === 0 ? null : (
+            <ul className="grid gap-0.5">
+              {(feeds.transactionDates ?? []).map((line, index) => (
+                <li key={`${line}-${index}`} title={line} className="truncate text-xs text-foreground">
+                  {line}
+                </li>
+              ))}
+            </ul>
+          )}
+        </Tile>
       </div>
     </div>
   );

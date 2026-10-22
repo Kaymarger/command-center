@@ -1,8 +1,8 @@
 import { connection, NextResponse } from "next/server";
 import { skipDraft, loadJob } from "@/lib/bot-store";
 import { dispatchToBot, signalExistingJob } from "@/lib/bots/runtime";
-import { calendarDateFromCell, calendarToday, formatLongDate } from "@/lib/dashboard-text";
-import { appendSheetRow, deleteSheetRow, ensureSheetTab, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
+import { calendarDateFromCell, calendarToday } from "@/lib/dashboard-text";
+import { appendSheetRow, deleteSheetRow, deleteSheetRows, ensureSheetTab, listSheetTitles, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
 import type { BotTarget } from "@/lib/ops-actions";
 import {
   botIdFromSheet,
@@ -17,18 +17,19 @@ import {
 } from "@/lib/ops-card-rows";
 import { requireUserSession } from "@/lib/ops-guard";
 import {
-  appendCachedImportantDates,
   appendCachedOpsItem,
-  cachedImportantDates,
   cachedKeyDateColumns,
   cachedKeyDateHeaderRow,
   cachedKeyDateTabTitle,
+  cachedNotepadKeyDates,
   cachedOpenHouseColumns,
   cachedOpenHouseTabTitle,
   cachedTodoColumns,
   cachedTodoTabTitle,
   patchCachedOpsItem,
+  rememberImportantDatesDraft,
   rememberKeyDateColumn,
+  rememberNotepadKeyDates,
 } from "@/lib/sheet-sync";
 
 export const dynamic = "force-dynamic";
@@ -280,10 +281,8 @@ export async function POST(request: Request) {
 
     if (body.type === "save-important-dates") {
       const today = calendarToday();
-      const writes = keyDateWritesFromDump(String(body.text ?? ""), today);
-      if (!writes.length) {
-        throw new Error("No dates found to save. Include a date on each line.");
-      }
+      const text = String(body.text ?? "");
+      const writes = keyDateWritesFromDump(text, today);
       const sheetId = opsSheetId();
       if (!sheetId) {
         throw new Error("AREG_OPS_SHEET_ID is not set, so these dates were not saved to KeyDates.");
@@ -309,20 +308,35 @@ export async function POST(request: Request) {
       if (!cached) {
         Object.entries(columns).forEach(([key, column]) => rememberKeyDateColumn(key, column));
       }
-      const existing = cachedImportantDates();
-      const seen = new Set<string>();
-      const fresh = writes.filter((write) => {
+      const wanted = new Map<string, (typeof writes)[number]>();
+      writes.forEach((write) => {
         const stamp = write.event_date || write.subject_removal_date || write.completion_date || write.possession_date;
-        const key = `${stamp}|${write.note}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        const label = formatLongDate(write.day);
-        return !existing.find((group) => group.label === label)?.notes.includes(write.note);
+        wanted.set(`${stamp}|${write.note}`, write);
+      });
+      const existing = cachedNotepadKeyDates();
+      const have = new Set(existing.map((row) => `${row.iso}|${row.note}`));
+      const removing = existing.filter((row) => !wanted.has(`${row.iso}|${row.note}`));
+      if (removing.length) {
+        const listed = await listSheetTitles(sheetId);
+        const found = listed.find((entry) => sheetTabMatches(entry.title, tab));
+        if (found) await deleteSheetRows(sheetId, found.sheetId, removing.map((row) => row.row));
+      }
+      const fresh = [...wanted.values()].filter((write) => {
+        const stamp = write.event_date || write.subject_removal_date || write.completion_date || write.possession_date;
+        return !have.has(`${stamp}|${write.note}`);
       });
       const width = Math.max(
         OPS_CARD_TABS.completionDates.columns.length,
         ...Object.values(columns).map((index) => index + 1),
       );
+      const removedRows = removing.map((row) => row.row);
+      const kept = existing
+        .filter((row) => wanted.has(`${row.iso}|${row.note}`))
+        .map((row) => ({
+          ...row,
+          row: row.row - removedRows.filter((removed) => removed < row.row).length,
+        }));
+      const savedRows = [...kept];
       for (const write of fresh) {
         const row = Array.from({ length: width }, () => "");
         const put = (key: string, value: string) => {
@@ -338,11 +352,12 @@ export async function POST(request: Request) {
         put("possession_date", write.possession_date);
         put("event_date", write.event_date);
         put("source", write.source);
-        await appendSheetRow(sheetId, tab, row);
+        const appended = await appendSheetRow(sheetId, tab, row);
+        const stamp = write.event_date || write.subject_removal_date || write.completion_date || write.possession_date;
+        if (appended.row != null) savedRows.push({ row: appended.row, iso: stamp, note: write.note });
       }
-      if (fresh.length) {
-        appendCachedImportantDates(fresh.map((write) => ({ day: write.day, note: write.note })));
-      }
+      rememberNotepadKeyDates(savedRows);
+      rememberImportantDatesDraft(text);
       return NextResponse.json({ ok: true, saved: fresh.length });
     }
 
@@ -357,13 +372,18 @@ export async function POST(request: Request) {
       }
       const sheetId = opsSheetId();
       if (!sheetId) throw new Error("AREG_OPS_SHEET_ID is not set, so the to-do was not added.");
-      const columns = cachedTodoColumns() ?? {
+      let columns = cachedTodoColumns() ?? {
         due_date: 0,
         item: 1,
         address: 2,
         owner_bot: 3,
         status: 4,
       };
+      if (columns.source == null) {
+        const nextColumn = Math.max(-1, ...Object.values(columns)) + 1;
+        await updateSheetCell(sheetId, cachedTodoTabTitle(), 1, nextColumn, "source");
+        columns = { ...columns, source: nextColumn };
+      }
       const width = Math.max(5, ...Object.values(columns).map((index) => index + 1));
       const row = Array.from({ length: width }, () => "");
       const put = (key: string, value: string) => {
@@ -376,6 +396,7 @@ export async function POST(request: Request) {
       put("address", address);
       put("owner_bot", owner);
       put("status", "open");
+      put("source", "dashboard");
       const todoTab = cachedTodoTabTitle();
       const appended = await appendSheetRow(sheetId, todoTab, row);
       const today = calendarToday();

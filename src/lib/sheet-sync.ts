@@ -13,19 +13,20 @@ import { calendarToday, currentOpenHouseRows, type CalendarDay } from "@/lib/das
 import {
   cincFromTable,
   dateColumnPresent,
-  dealItems,
   dealsFromDateSheet,
   EMAIL_DRAFT_SHEET_HEADERS,
   EMAIL_DRAFTS_TAB,
   findNamedTab,
   FIRM_TODO_TAB,
   GBP_TAB,
-  GOOGLE_BUSINESS_HEADERS,
   GOOGLE_BUSINESS_QUEUE_TAB,
   GOOGLE_BUSINESS_TAB,
+  MARKETING_QUEUE_HEADERS,
+  MARKETING_QUEUE_TAB,
   mergeKeyDeals,
   mergeImportantDateGroups,
-  openDealAddressKeys,
+  transactionDateLines,
+  type NotepadKeyDate,
   OPS_CARD_TABS,
   opsCardsFromTabs,
   removableDocusignRows,
@@ -36,6 +37,7 @@ import {
   transactionChecklistItems,
   type KeyDeal,
 } from "@/lib/ops-card-rows";
+import { readGmailDrafts } from "@/lib/gmail-drafts";
 import { feedsFromSheetTables } from "@/lib/feeds-io";
 import { awaitStoreReady, listDrafts, reloadFeedsFromDisk, setFeeds } from "@/lib/bot-store";
 import {
@@ -132,6 +134,7 @@ type DashboardStore = {
   keyDateColumns: Record<string, number> | null;
   keyDateHeaderRow: number;
   keyDateTabTitle: string;
+  notepadKeyDates: NotepadKeyDate[];
 };
 
 const BACKOFF_START_MS = 60_000;
@@ -154,6 +157,7 @@ function dashboardStore(): DashboardStore {
       keyDateColumns: null,
       keyDateHeaderRow: 1,
       keyDateTabTitle: OPS_CARD_TABS.completionDates.tab,
+      notepadKeyDates: [],
     };
   }
   return g.__areg_dashboard_cache__;
@@ -181,6 +185,7 @@ function opsWantedTabs(): WantedTab[] {
     { title: GOOGLE_BUSINESS_QUEUE_TAB },
     { title: GOOGLE_BUSINESS_TAB },
     { title: GBP_TAB },
+    { title: MARKETING_QUEUE_TAB },
   ];
   return [...legacy, ...cards, ...extra];
 }
@@ -214,7 +219,7 @@ function pickTab(
 
 async function ensureDashboardTabs(spreadsheetId: string): Promise<string | null> {
   try {
-    await ensureSheetTab(spreadsheetId, GOOGLE_BUSINESS_QUEUE_TAB, GOOGLE_BUSINESS_HEADERS);
+    await ensureSheetTab(spreadsheetId, MARKETING_QUEUE_TAB, MARKETING_QUEUE_HEADERS);
     await ensureSheetTab(spreadsheetId, EMAIL_DRAFTS_TAB, EMAIL_DRAFT_SHEET_HEADERS);
     return null;
   } catch (error) {
@@ -370,6 +375,8 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
   keyDateColumns: Record<string, number> | null;
   keyDateHeaderRow: number;
   keyDateTabTitle: string;
+  importantDatesDraft: string;
+  notepadKeyDates: NotepadKeyDate[];
 }> {
   const tables = await opsTables();
   const feeds = feedsFromSheetTables({
@@ -389,10 +396,11 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
   feeds.opsCardNotes = built.notes;
   feeds.sheetEmailDrafts = built.sheetEmailDrafts;
   feeds.importantDates = built.importantDates;
+  feeds.importantDatesDraft = built.importantDatesDraft;
   if (tables.setupError) {
     const parts = tables.setupError.split(/(?<=\.)\s+/);
     const take = (pattern: RegExp) => parts.filter((part) => pattern.test(part)).join(" ");
-    const google = take(/GoogleBusiness/i);
+    const google = take(/MarketingQueue|GoogleBusiness/i);
     const email = take(/EmailDrafts/i);
     const removed = take(/delete that row/i);
     if (google) {
@@ -432,6 +440,8 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
     keyDateTabTitle:
       findNamedTab(tables.tabs, OPS_CARD_TABS.completionDates.tab)?.title ||
       OPS_CARD_TABS.completionDates.tab,
+    importantDatesDraft: built.importantDatesDraft,
+    notepadKeyDates: built.notepadKeyDates,
   };
 }
 
@@ -512,6 +522,22 @@ export function rememberKeyDateColumn(key: string, column: number) {
 
 export function cachedImportantDates(): { label: string; notes: string[] }[] {
   return dashboardStore().payload?.feeds.importantDates ?? [];
+}
+
+export function cachedNotepadKeyDates(): NotepadKeyDate[] {
+  return dashboardStore().notepadKeyDates ?? [];
+}
+
+export function rememberNotepadKeyDates(rows: NotepadKeyDate[]) {
+  dashboardStore().notepadKeyDates = rows;
+}
+
+export function rememberImportantDatesDraft(text: string) {
+  const box = dashboardStore();
+  box.payload = box.payload
+    ? { ...box.payload, feeds: { ...box.payload.feeds, importantDatesDraft: text } }
+    : box.payload;
+  publishDashboardFeeds();
 }
 
 export function appendCachedImportantDates(additions: { day: CalendarDay; note: string }[]) {
@@ -714,13 +740,14 @@ function parsedForOpsTab(title: string, feeds: LiveFeeds): number {
   if (/outstanding/i.test(title)) return cards.outstandingEmails.length;
   if (/docusign/i.test(title)) return cards.docusignDrafts.length;
   if (sheetTabMatches(title, OPS_CARD_TABS.subjectRemovals.tab)) return cards.subjectRemovals.length;
-  if (sheetTabMatches(title, OPS_CARD_TABS.completionDates.tab)) return cards.completionDates.length;
+  if (sheetTabMatches(title, OPS_CARD_TABS.completionDates.tab)) return feeds.transactionDates?.length ?? cards.completionDates.length;
   if (sheetTabMatches(title, OPS_CARD_TABS.todos.tab)) return cards.todos.length;
   if (sheetTabMatches(title, OPS_CARD_TABS.scheduledOpenHouses.tab)) {
     return cards.scheduledOpenHouses?.length ?? 0;
   }
   if (sheetTabMatches(title, EMAIL_DRAFTS_TAB)) return feeds.sheetEmailDrafts?.length ?? 0;
   if (
+    sheetTabMatches(title, MARKETING_QUEUE_TAB) ||
     sheetTabMatches(title, GOOGLE_BUSINESS_QUEUE_TAB) ||
     sheetTabMatches(title, GOOGLE_BUSINESS_TAB) ||
     sheetTabMatches(title, GBP_TAB)
@@ -826,6 +853,7 @@ async function buildPayload(): Promise<DashboardPayload> {
   let keyDateColumns: Record<string, number> | null = null;
   let keyDateHeaderRow = 1;
   let keyDateTabTitle = OPS_CARD_TABS.completionDates.tab;
+  let notepadKeyDates: NotepadKeyDate[] = [];
   const today = calendarToday();
   try {
     const synced = await syncFeedsFromGoogleSheet();
@@ -839,6 +867,7 @@ async function buildPayload(): Promise<DashboardPayload> {
     keyDateColumns = synced.keyDateColumns;
     keyDateHeaderRow = synced.keyDateHeaderRow;
     keyDateTabTitle = synced.keyDateTabTitle;
+    notepadKeyDates = synced.notepadKeyDates;
   } catch (error) {
     if (isQuotaError(error)) throw error;
     opsReadFailed = true;
@@ -895,31 +924,20 @@ async function buildPayload(): Promise<DashboardPayload> {
 
   const transactions = await readTransactionsSheet(today);
   const keyDates = findNamedTab(opsTabs, OPS_CARD_TABS.completionDates.tab);
-  const openDeals = keyDates && !keyDates.error ? openDealAddressKeys(keyDates.rows, today) : null;
-  const firmItems = transactions.items.map((item) => ({
-    ...item,
-    stale: Boolean(item.stale || (openDeals && item.dealKey && !openDeals.has(item.dealKey))),
-  }));
-  const completionItems = dealItems(
-    mergeKeyDeals([
-      keyDates ? dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title) : [],
-      transactions.completion,
-    ]),
-    "completion",
+  const subjectTab = findNamedTab(opsTabs, OPS_CARD_TABS.subjectRemovals.tab);
+  const transactionDates = transactionDateLines(
+    subjectTab && !subjectTab.error ? subjectTab.rows : [],
+    keyDates && !keyDates.error ? keyDates.rows : [],
+    transactions.completion,
+    today,
   );
-  const completionNote = feeds.opsCardNotes?.completionDates ?? "";
-  const todoNote = [feeds.opsCardNotes?.todos, transactions.error].filter(Boolean).join(" ");
   feeds = {
     ...feeds,
+    transactionDates,
     opsCards: {
       ...feeds.opsCards,
-      todos: [...(feeds.opsCards?.todos ?? []), ...firmItems],
-      completionDates: completionItems,
-    },
-    opsCardNotes: {
-      ...feeds.opsCardNotes,
-      ...(todoNote ? { todos: todoNote } : {}),
-      ...(completionNote ? { completionDates: completionNote } : {}),
+      todos: feeds.opsCards?.todos ?? [],
+      completionDates: transactionDates.map((text, index) => ({ id: `transaction-date-${index}`, text })),
     },
   };
   dashboardStore().todoColumns = todoColumns;
@@ -929,6 +947,14 @@ async function buildPayload(): Promise<DashboardPayload> {
   dashboardStore().keyDateColumns = keyDateColumns;
   dashboardStore().keyDateHeaderRow = keyDateHeaderRow;
   dashboardStore().keyDateTabTitle = keyDateTabTitle;
+  dashboardStore().notepadKeyDates = notepadKeyDates;
+
+  const gmailDrafts = await readGmailDrafts();
+  if (gmailDrafts.ok) {
+    feeds = { ...feeds, sheetEmailDrafts: gmailDrafts.items, emailDraftNote: "" };
+  } else if (gmailDrafts.reason === "error") {
+    feeds = { ...feeds, emailDraftNote: [feeds.emailDraftNote, gmailDrafts.message].filter(Boolean).join(" ") };
+  }
 
   if (!opsReadFailed) await setFeeds(feeds);
 

@@ -115,6 +115,8 @@ export type OpsCardItem = {
   bot?: string;
   /** ISO time used to sort email drafts. */
   createdAt?: string;
+  /** Opens the Gmail draft or the sheet link. */
+  href?: string;
   /** Hidden on To-Do's until Show all. Older than 30 days, or the deal is closed. */
   stale?: boolean;
   /** Address key used to tell whether a checklist row's deal is still open. */
@@ -173,6 +175,10 @@ export type LiveFeeds = {
   sheetEmailDrafts?: OpsCardItem[];
   /** KeyDates rows, soonest day first. */
   importantDates?: { label: string; notes: string[] }[];
+  /** Notepad lines rebuilt from KeyDates rows Kayla saved. */
+  importantDatesDraft?: string;
+  /** Upcoming Transaction Dates, soonest first. */
+  transactionDates?: string[];
   /** Shown on Email Drafts when the EmailDrafts tab could not be created. */
   emailDraftNote?: string;
 };
@@ -211,6 +217,8 @@ export function emptyFeeds(source: LiveFeeds["source"] = "empty"): LiveFeeds {
     cincNote: "",
     sheetEmailDrafts: [],
     importantDates: [],
+    importantDatesDraft: "",
+    transactionDates: [],
     emailDraftNote: "",
   };
 }
@@ -226,6 +234,7 @@ export function feedHasRows(feeds: LiveFeeds): boolean {
     feeds.birthdays.length > 0 ||
     feeds.outstandingEmails.length > 0 ||
     (feeds.importantDates?.length ?? 0) > 0 ||
+    (feeds.transactionDates?.length ?? 0) > 0 ||
     Object.values(feeds.opsCards ?? {}).some((items) => items.length > 0)
   );
 }

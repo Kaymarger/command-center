@@ -29,6 +29,8 @@ export async function readFeedsFile(): Promise<LiveFeeds> {
       cincNote: parsed.cincNote ?? "",
       sheetEmailDrafts: parsed.sheetEmailDrafts ?? [],
       importantDates: parsed.importantDates ?? [],
+      importantDatesDraft: parsed.importantDatesDraft ?? "",
+      transactionDates: parsed.transactionDates ?? [],
       emailDraftNote: parsed.emailDraftNote ?? "",
     };
   } catch {
