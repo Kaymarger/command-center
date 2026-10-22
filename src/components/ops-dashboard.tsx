@@ -52,16 +52,19 @@ function MiniButton({
   disabled,
   onClick,
   title,
+  label,
 }: {
   children: ReactNode;
   disabled?: boolean;
   onClick: () => void;
   title?: string;
+  label?: string;
 }) {
   return (
     <button
       type="button"
       title={title}
+      aria-label={label}
       disabled={disabled}
       onClick={onClick}
       className="shrink-0 rounded border border-white/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-[#7395B8] transition hover:border-[#7395B8]/60 hover:text-foreground disabled:opacity-40"
@@ -329,6 +332,15 @@ export function OpsDashboard() {
     address: "",
     ownerBot: "",
   });
+  const [addingOpenHouse, setAddingOpenHouse] = useState(false);
+  const [openHouseDraft, setOpenHouseDraft] = useState({
+    address: "",
+    date: "",
+    startTime: "",
+    endTime: "",
+    hostAgent: "",
+    notes: "",
+  });
   const recentJobs = jobs.slice(0, 8).map((job) => {
     const override = jobOverride[job.id];
     if (override && override.updatedAt >= job.updatedAt) return override;
@@ -502,6 +514,39 @@ export function OpsDashboard() {
       column: item.sheet?.column,
     });
     if (data) setHiddenIds((current) => new Set(current).add(item.id));
+  }
+
+  async function changeOpenHouse(item: OpsCardItem, command: "cancel" | "delete") {
+    const verb = command === "delete" ? "Delete" : "Cancel";
+    if (!window.confirm(`${verb} “${item.text}”? The Listings Bot will be told.`)) return;
+    const data = await postAction(item.id, {
+      type: command === "delete" ? "delete-open-house" : "cancel-open-house",
+      itemId: item.id,
+      text: item.text,
+      address: item.text,
+      detail: item.detail ?? "",
+      tab: item.sheet?.tab,
+      row: item.sheet?.row,
+      column: item.sheet?.column,
+    });
+    if (data) setHiddenIds((current) => new Set(current).add(item.id));
+  }
+
+  async function addOpenHouse(event: FormEvent) {
+    event.preventDefault();
+    const data = await postAction("add-open-house", {
+      type: "add-open-house",
+      address: openHouseDraft.address,
+      date: openHouseDraft.date,
+      startTime: openHouseDraft.startTime,
+      endTime: openHouseDraft.endTime,
+      hostAgent: openHouseDraft.hostAgent,
+      notes: openHouseDraft.notes,
+    });
+    if (data) {
+      setOpenHouseDraft({ address: "", date: "", startTime: "", endTime: "", hostAgent: "", notes: "" });
+      setAddingOpenHouse(false);
+    }
   }
 
   async function addTodo(event: FormEvent) {
@@ -686,7 +731,7 @@ export function OpsDashboard() {
               </form>
             ) : (
               <div className="mb-1">
-                <MiniButton onClick={() => setAddingTodo(true)}>Add</MiniButton>
+                <MiniButton label="Add to-do" onClick={() => setAddingTodo(true)}>Add</MiniButton>
               </div>
             )
           }
@@ -813,6 +858,101 @@ export function OpsDashboard() {
             placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
           />
         </Tile>
+
+        <OpsSheetCard
+          title="Open Houses"
+          live={live}
+          items={opsCards?.scheduledOpenHouses ?? []}
+          note={opsNotes.scheduledOpenHouses}
+          empty="No upcoming open houses."
+          expandedId={expandedId}
+          onToggle={toggle}
+          hidden={hiddenIds}
+          errors={actionError}
+          extra={
+            addingOpenHouse ? (
+              <form className="mb-1 grid gap-1" onSubmit={(event) => void addOpenHouse(event)}>
+                <input
+                  value={openHouseDraft.address}
+                  onChange={(event) => setOpenHouseDraft((current) => ({ ...current, address: event.target.value }))}
+                  placeholder="Address"
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Open house address"
+                />
+                <input
+                  type="date"
+                  value={openHouseDraft.date}
+                  onChange={(event) => setOpenHouseDraft((current) => ({ ...current, date: event.target.value }))}
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Open house date"
+                />
+                <div className="grid grid-cols-2 gap-1">
+                  <input
+                    type="time"
+                    value={openHouseDraft.startTime}
+                    onChange={(event) => setOpenHouseDraft((current) => ({ ...current, startTime: event.target.value }))}
+                    className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                    aria-label="Start time"
+                  />
+                  <input
+                    type="time"
+                    value={openHouseDraft.endTime}
+                    onChange={(event) => setOpenHouseDraft((current) => ({ ...current, endTime: event.target.value }))}
+                    className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                    aria-label="End time"
+                  />
+                </div>
+                <input
+                  value={openHouseDraft.hostAgent}
+                  onChange={(event) => setOpenHouseDraft((current) => ({ ...current, hostAgent: event.target.value }))}
+                  placeholder="Host agent"
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Host agent"
+                />
+                <input
+                  value={openHouseDraft.notes}
+                  onChange={(event) => setOpenHouseDraft((current) => ({ ...current, notes: event.target.value }))}
+                  placeholder="Notes"
+                  className="h-6 rounded border border-white/15 bg-black/20 px-1 text-[0.7rem]"
+                  aria-label="Open house notes"
+                />
+                <div className="flex gap-1">
+                  <button
+                    type="submit"
+                    disabled={pendingId === "add-open-house"}
+                    className="rounded border border-white/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-[#7395B8]"
+                  >
+                    Save
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddingOpenHouse(false)}
+                    className="rounded border border-white/15 px-1.5 py-0.5 text-[0.65rem] font-medium text-[#7395B8]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                {actionError["add-open-house"] ? (
+                  <p className="text-[0.65rem] leading-snug text-amber-200">{actionError["add-open-house"]}</p>
+                ) : null}
+              </form>
+            ) : (
+              <div className="mb-1">
+                <MiniButton label="Add open house" onClick={() => setAddingOpenHouse(true)}>Add</MiniButton>
+              </div>
+            )
+          }
+          renderActions={(item) => (
+            <>
+              <MiniButton disabled={pendingId === item.id || !item.sheet} onClick={() => void changeOpenHouse(item, "cancel")}>
+                Cancel
+              </MiniButton>
+              <MiniButton disabled={pendingId === item.id || !item.sheet} onClick={() => void changeOpenHouse(item, "delete")}>
+                Delete
+              </MiniButton>
+            </>
+          )}
+        />
 
         <Tile title="Open House Availability" botId="google-forms" live={live}>
           {openHouseError ? (

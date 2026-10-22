@@ -2,18 +2,27 @@ import { connection, NextResponse } from "next/server";
 import { skipDraft, loadJob } from "@/lib/bot-store";
 import { dispatchToBot, signalExistingJob } from "@/lib/bots/runtime";
 import { calendarDateFromCell, calendarToday } from "@/lib/dashboard-text";
-import { appendSheetRow, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
+import { appendSheetRow, ensureSheetTab, opsSheetId, transactionsSheetId, updateSheetCell } from "@/lib/google-sheets";
 import type { BotTarget } from "@/lib/ops-actions";
 import {
   botIdFromSheet,
   EMAIL_DRAFTS_TAB,
   FIRM_TODO_TAB,
   OPS_CARD_TABS,
+  SCHEDULED_OPEN_HOUSE_HEADERS,
+  scheduledOpenHouseRows,
   sheetTabMatches,
   todoSentenceFromSheet,
 } from "@/lib/ops-card-rows";
 import { requireUserSession } from "@/lib/ops-guard";
-import { appendCachedOpsItem, cachedTodoColumns, cachedTodoTabTitle, patchCachedOpsItem } from "@/lib/sheet-sync";
+import {
+  appendCachedOpsItem,
+  cachedOpenHouseColumns,
+  cachedOpenHouseTabTitle,
+  cachedTodoColumns,
+  cachedTodoTabTitle,
+  patchCachedOpsItem,
+} from "@/lib/sheet-sync";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -52,6 +61,13 @@ function allowedValue(spreadsheet: string, tab: string, value: string): boolean 
     return true;
   }
   if (spreadsheet === "transactions" && sheetTabMatches(tab, FIRM_TODO_TAB) && value === "n/a") {
+    return true;
+  }
+  if (
+    spreadsheet === "ops" &&
+    sheetTabMatches(tab, OPS_CARD_TABS.scheduledOpenHouses.tab) &&
+    (value === "cancelled" || value === "deleted")
+  ) {
     return true;
   }
   return false;
@@ -116,6 +132,11 @@ export async function POST(request: Request) {
     subject?: string;
     to?: string;
     bodyText?: string;
+    date?: string;
+    startTime?: string;
+    endTime?: string;
+    hostAgent?: string;
+    notes?: string;
   } | null;
 
   if (!body?.type) {
@@ -297,6 +318,118 @@ export async function POST(request: Request) {
             : { spreadsheet: "ops", tab: todoTab, row: appended.row, column: statusColumn },
       });
       return NextResponse.json({ ok: true });
+    }
+
+    if (body.type === "add-open-house") {
+      const address = String(body.address ?? "").trim();
+      const date = String(body.date ?? "").trim();
+      const start = String(body.startTime ?? "").trim();
+      const end = String(body.endTime ?? "").trim();
+      const host = String(body.hostAgent ?? "").trim();
+      const notes = String(body.notes ?? "").trim();
+      const sheetId = opsSheetId();
+      if (!sheetId) {
+        throw new Error("AREG_OPS_SHEET_ID is not set, so the open house was not saved.");
+      }
+      const tab = await ensureSheetTab(sheetId, cachedOpenHouseTabTitle(), SCHEDULED_OPEN_HOUSE_HEADERS);
+      const when = [date, start && end ? `${start}–${end}` : start || end].filter(Boolean).join(" ");
+      const summary = ["Open house", address, when, host ? `hosted by ${host}` : "", notes]
+        .filter(Boolean)
+        .join(" · ");
+      const job = await dispatchToBot({
+        actionId: "schedule-open-house",
+        actionLabel: "Open Houses",
+        bot: "listings",
+        summary,
+        optionPath: ["Add Opens"],
+        optionIds: ["add-opens"],
+        primaryValue: address,
+        secondaryValue: host,
+        detailsValue: notes,
+      });
+      if (job.status === "error") {
+        return NextResponse.json(
+          { ok: false, error: job.result ?? "The Listings Bot did not get this open house, so it was not saved." },
+          { status: 502 },
+        );
+      }
+      const columns = cachedOpenHouseColumns() ?? {
+        date: 0,
+        start_time: 1,
+        end_time: 2,
+        address: 3,
+        host_agent: 4,
+        notes: 5,
+        status: 6,
+        created_at: 7,
+      };
+      const width = Math.max(SCHEDULED_OPEN_HOUSE_HEADERS.length, ...Object.values(columns).map((index) => index + 1));
+      const row = Array.from({ length: width }, () => "");
+      const put = (key: string, value: string) => {
+        const index = columns[key];
+        if (index == null || index < 0 || index >= row.length) return;
+        row[index] = value;
+      };
+      const createdAt = new Date().toISOString();
+      put("date", date);
+      put("start_time", start);
+      put("end_time", end);
+      put("address", address);
+      put("host_agent", host);
+      put("notes", notes);
+      put("status", "scheduled");
+      put("created_at", createdAt);
+      const appended = await appendSheetRow(sheetId, tab, row);
+      const preview = scheduledOpenHouseRows(
+        [[...SCHEDULED_OPEN_HOUSE_HEADERS], [date, start, end, address, host, notes, "scheduled", createdAt]],
+        calendarToday(),
+        tab,
+      );
+      const shown = preview.items[0];
+      const statusColumn = columns.status ?? 6;
+      appendCachedOpsItem("scheduledOpenHouses", {
+        id: appended.row == null ? `open-house-new-${Date.now()}` : `open-house-${appended.row}`,
+        text: shown?.text || summary,
+        detail: shown?.detail || summary,
+        sheet:
+          appended.row == null
+            ? undefined
+            : { spreadsheet: "ops", tab, row: appended.row, column: statusColumn },
+      });
+      return NextResponse.json({ ok: true, job });
+    }
+
+    if (body.type === "cancel-open-house" || body.type === "delete-open-house") {
+      const deleting = body.type === "delete-open-house";
+      const label = String(body.text ?? "this open house").trim() || "this open house";
+      const job = await dispatchToBot({
+        actionId: deleting ? "delete-open-house" : "cancel-open-house",
+        actionLabel: "Open Houses",
+        bot: "listings",
+        summary: `${deleting ? "Delete" : "Cancel"} this open house: ${label}.`,
+        optionPath: [deleting ? "Delete" : "Cancel"],
+        optionIds: [deleting ? "delete-open-house" : "cancel-open-house"],
+        primaryValue: String(body.address ?? label),
+        detailsValue: String(body.detail ?? ""),
+      });
+      if (job.status === "error") {
+        return NextResponse.json(
+          {
+            ok: false,
+            error: job.result ?? "The Listings Bot did not get this, so the sheet was not changed.",
+          },
+          { status: 502 },
+        );
+      }
+      await writeCell({
+        spreadsheet: "ops",
+        tab: String(body.tab ?? OPS_CARD_TABS.scheduledOpenHouses.tab),
+        row: body.row,
+        column: body.column,
+        value: deleting ? "deleted" : "cancelled",
+      });
+      if (body.itemId) patchCachedOpsItem(body.itemId, null);
+      return NextResponse.json({ ok: true, job });
     }
 
     if (body.type === "draft-send") {

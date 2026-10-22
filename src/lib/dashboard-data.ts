@@ -84,6 +84,7 @@ export type OpsCardKey =
   | "subjectRemovals"
   | "completionDates"
   | "todos"
+  | "scheduledOpenHouses"
   | "googleBusiness";
 
 export type SheetCellRef = {
@@ -137,6 +138,7 @@ export function emptyOpsCards(): OpsCards {
     subjectRemovals: [],
     completionDates: [],
     todos: [],
+    scheduledOpenHouses: [],
     googleBusiness: [],
   };
 }

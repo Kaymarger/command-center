@@ -387,6 +387,17 @@ async function completeListingsJob(
   const property = input.primaryValue?.trim() || "Property";
   const details = input.detailsValue?.trim();
 
+  if (
+    input.actionId === "schedule-open-house" ||
+    input.actionId === "cancel-open-house" ||
+    input.actionId === "delete-open-house"
+  ) {
+    return {
+      result: sentToComplete("listings", input.summary),
+      artifacts: [],
+    };
+  }
+
   if (input.actionId === "open-houses") {
     return completeOpenHouseJob(input, jobId);
   }

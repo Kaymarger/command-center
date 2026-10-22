@@ -466,6 +466,17 @@ export async function readSpreadsheet(spreadsheetId: string): Promise<SheetTab[]
   return batchGetCached(spreadsheetId, listed);
 }
 
+function invalidateSpreadsheet(spreadsheetId: string) {
+  const state = readState();
+  state.titles.delete(spreadsheetId);
+  for (const key of [...state.values.keys()]) {
+    if (key.startsWith(`${spreadsheetId}\n`)) state.values.delete(key);
+  }
+  for (const key of [...state.plans.keys()]) {
+    if (key.startsWith(`${spreadsheetId}|`)) state.plans.delete(key);
+  }
+}
+
 function columnLetter(index: number): string {
   let n = index + 1;
   let letters = "";
@@ -498,7 +509,10 @@ export async function updateSheetCell(
     },
     body: JSON.stringify({ values: [[value]] }),
   });
-  if (res.ok) return;
+  if (res.ok) {
+    invalidateSpreadsheet(spreadsheetId);
+    return;
+  }
   const body = (await res.json().catch(() => ({}))) as { error?: { message?: string } };
   const detail = body.error?.message?.trim();
   let message = detail
@@ -533,6 +547,7 @@ export async function appendSheetRow(
     body: JSON.stringify({ values: [values] }),
   });
   if (res.ok) {
+    invalidateSpreadsheet(spreadsheetId);
     const body = (await res.json().catch(() => ({}))) as {
       updates?: { updatedRange?: string };
     };
@@ -549,6 +564,71 @@ export async function appendSheetRow(
     message += ` Share the sheet with ${email} as an Editor.`;
   }
   throw new GoogleReadError(res.status, message);
+}
+
+/**
+ * Create a tab when it is missing, then write the header row.
+ * Matching an existing tab by name does not change its cells.
+ * These calls are updates, not reads.
+ */
+export async function ensureSheetTab(
+  spreadsheetId: string,
+  title: string,
+  headers: readonly string[],
+): Promise<string> {
+  const listed = await listSheetTitles(spreadsheetId);
+  const found = listed.find((tab) => sameTitle(tab.title, title));
+  if (found) return found.title;
+
+  const { token, email } = await accessToken();
+  const createUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}:batchUpdate`;
+  const created = await fetch(createUrl, {
+    method: "POST",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      requests: [{ addSheet: { properties: { title } } }],
+    }),
+  });
+  if (!created.ok) {
+    const body = (await created.json().catch(() => ({}))) as { error?: { message?: string } };
+    const detail = body.error?.message?.trim() ?? "";
+    if (created.status === 400 && /already exists/i.test(detail)) {
+      invalidateSpreadsheet(spreadsheetId);
+      return title;
+    }
+    let message = detail
+      ? `Google could not add the ${title} tab (HTTP ${created.status}): ${detail}`
+      : `Google could not add the ${title} tab (HTTP ${created.status}).`;
+    if (created.status === 403) message += ` Share the sheet with ${email} as an Editor.`;
+    throw new GoogleReadError(created.status, message);
+  }
+
+  const escaped = title.replace(/'/g, "''");
+  const range = `'${escaped}'!A1`;
+  const headerUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const headerWrite = await fetch(headerUrl, {
+    method: "PUT",
+    cache: "no-store",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ values: [headers] }),
+  });
+  invalidateSpreadsheet(spreadsheetId);
+  if (headerWrite.ok) return title;
+  const body = (await headerWrite.json().catch(() => ({}))) as { error?: { message?: string } };
+  const detail = body.error?.message?.trim();
+  throw new GoogleReadError(
+    headerWrite.status,
+    detail
+      ? `Google added ${title}, but could not write its header (HTTP ${headerWrite.status}): ${detail}`
+      : `Google added ${title}, but could not write its header (HTTP ${headerWrite.status}).`,
+  );
 }
 
 export async function readPublicCsv(spreadsheetId: string, gid: number): Promise<string[][]> {

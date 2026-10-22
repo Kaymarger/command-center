@@ -64,7 +64,22 @@ export const OPS_CARD_TABS: Record<
     tab: "ToDos",
     columns: ["due_date", "item", "address", "owner_bot", "status"],
   },
+  scheduledOpenHouses: {
+    tab: "OpenHouses",
+    columns: ["date", "start_time", "end_time", "address", "host_agent", "notes", "status", "created_at"],
+  },
 };
+
+export const SCHEDULED_OPEN_HOUSE_HEADERS = [
+  "date",
+  "start_time",
+  "end_time",
+  "address",
+  "host_agent",
+  "notes",
+  "status",
+  "created_at",
+] as const;
 
 export const FIRM_TODO_TAB = "Firm Transactions To Dos";
 export const EMAIL_DRAFTS_TAB = "EmailDrafts";
@@ -888,6 +903,114 @@ function loadedTab(
   return tab;
 }
 
+function parseClock(value: string): { hour: number; minute: string } | null {
+  const match = value.trim().match(/^(\d{1,2})(?::(\d{2}))?(?::\d{2})?\s*(AM|PM)?/i);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = match[2] ?? "00";
+  const suffix = match[3]?.toUpperCase();
+  if (suffix === "PM" && hour < 12) hour += 12;
+  if (suffix === "AM" && hour === 12) hour = 0;
+  if (hour > 23 || Number(minute) > 59) return null;
+  return { hour, minute };
+}
+
+function formatClock(value: string): string {
+  const parsed = parseClock(value);
+  if (!parsed) return value.trim();
+  const suffix = parsed.hour >= 12 ? "PM" : "AM";
+  const hour = parsed.hour % 12 || 12;
+  return parsed.minute === "00" ? `${hour} ${suffix}` : `${hour}:${parsed.minute} ${suffix}`;
+}
+
+function clockMinutes(value: string): number {
+  const parsed = parseClock(value);
+  if (!parsed) return 24 * 60;
+  return parsed.hour * 60 + Number(parsed.minute);
+}
+
+/** Upcoming scheduled open houses, soonest first. Past dates are left out. */
+export function scheduledOpenHouseRows(
+  rows: string[][],
+  today: CalendarDay,
+  tabTitle: string,
+): { items: OpsCardItem[]; columns: Record<string, number> | null } {
+  if (!rows.length) return { items: [], columns: null };
+  const headerAt = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    const hasAddress = headers.some((header) => ADDRESS_HEADERS.includes(header));
+    const hasWhen = headers.some((header) => /^(date|open_house_date|start_time|start|host_agent|host)$/.test(header));
+    return hasAddress || hasWhen;
+  });
+  if (headerAt < 0) return { items: [], columns: null };
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  const columns: Record<string, number> = {};
+  headers.forEach((key, column) => {
+    if (key && columns[key] == null) columns[key] = column;
+  });
+  const items = rows
+    .slice(headerAt + 1)
+    .map((row, offset) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return { rowNumber: headerAt + 2 + offset, record };
+    })
+    .filter((entry) => Object.values(entry.record).some(Boolean))
+    .map((entry) => ({
+      rowNumber: entry.rowNumber,
+      address: field(entry.record, ...ADDRESS_HEADERS),
+      host: field(entry.record, "host_agent", "host", "hosting_agent", "agent"),
+      notes: field(entry.record, "notes", "note"),
+      status: field(entry.record, "status"),
+      start: field(entry.record, "start_time", "start"),
+      end: field(entry.record, "end_time", "end"),
+      date: calendarDateFromCell(field(entry.record, "date", "open_house_date"), today.year),
+    }))
+    .filter((row) => !closedStatus(row.status) && !/^deleted$/i.test(row.status))
+    .filter((row) => !row.date || compareCalendarDays(row.date, today) >= 0)
+    .filter((row) => row.address || row.host || row.date)
+    .sort((a, b) => {
+      if (a.date && b.date) {
+        const byDay = compareCalendarDays(a.date, b.date);
+        if (byDay !== 0) return byDay;
+        return clockMinutes(a.start) - clockMinutes(b.start);
+      }
+      if (a.date) return -1;
+      if (b.date) return 1;
+      return a.rowNumber - b.rowNumber;
+    })
+    .map((row) => {
+      const start = formatClock(row.start);
+      const end = formatClock(row.end);
+      const time = start && end ? `${start}–${end}` : start || end;
+      const place = row.address ? shortAddress(row.address) || row.address : "";
+      const text = [row.date ? formatLongDate(row.date) : "", time, place, row.host].filter(Boolean).join(" · ");
+      const detail = [row.address, time, row.host ? `Host ${row.host}` : "", row.notes].filter(Boolean).join(" · ");
+      return item(`open-house-${row.rowNumber}`, text || "Open house", {
+        detail: detail || text,
+        sheet:
+          columns.status == null
+            ? undefined
+            : cellRef("ops", tabTitle, row.rowNumber, columns.status),
+      });
+    });
+  return { items, columns: Object.keys(columns).length ? columns : null };
+}
+
+/** Soonest dated line first. Lines with no date stay at the end. */
+export function sortScheduledOpenHouseItems(items: OpsCardItem[]): OpsCardItem[] {
+  const today = calendarToday();
+  const rank = (item: OpsCardItem) => {
+    const [when, time] = item.text.split(" · ");
+    const day = calendarDateFromCell(when ?? "", today.year);
+    const dayNum = day ? day.year * 10000 + day.month * 100 + day.day : 99_999_999;
+    return dayNum * 10_000 + clockMinutes(time ?? "");
+  };
+  return [...items].sort((a, b) => rank(a) - rank(b) || a.text.localeCompare(b.text));
+}
+
 function unparsedAnnualNote(title: string, rows: string[][], parsed: number): string | null {
   if (parsed > 0) return null;
   const dataRows = sheetDataRowCount(rows);
@@ -903,6 +1026,7 @@ export function opsCardsFromTabs(
   notes: Partial<Record<OpsCardKey, string>>;
   sheetEmailDrafts: OpsCardItem[];
   todoColumns: Record<string, number> | null;
+  openHouseColumns: Record<string, number> | null;
 } {
   const notes: Partial<Record<OpsCardKey, string>> = {};
   const cards = emptyOpsCards();
@@ -910,9 +1034,9 @@ export function opsCardsFromTabs(
     (Object.keys(cards) as OpsCardKey[]).forEach((key) => {
       notes[key] = options.sheetError ?? "";
     });
-    return { cards, notes, sheetEmailDrafts: [], todoColumns: null };
+    return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null };
   }
-  if (tabs.length === 0) return { cards, notes, sheetEmailDrafts: [], todoColumns: null };
+  if (tabs.length === 0) return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null };
 
   const today = options?.today ?? calendarToday();
   const anniversaries = loadedTab(tabs, OPS_CARD_TABS.clientAnniversaries.tab, notes, "clientAnniversaries");
@@ -923,6 +1047,7 @@ export function opsCardsFromTabs(
   const keyDates = loadedTab(tabs, OPS_CARD_TABS.subjectRemovals.tab, notes, "subjectRemovals");
   if (!keyDates && !notes.completionDates) notes.completionDates = notes.subjectRemovals;
   const todos = loadedTab(tabs, OPS_CARD_TABS.todos.tab, notes, "todos");
+  const openHouses = loadedTab(tabs, OPS_CARD_TABS.scheduledOpenHouses.tab, notes, "scheduledOpenHouses");
   const emailDrafts = findNamedTab(tabs, EMAIL_DRAFTS_TAB);
   const googleBusiness = findNamedTab(tabs, GOOGLE_BUSINESS_TAB);
   const gbp = findNamedTab(tabs, GBP_TAB);
@@ -952,6 +1077,15 @@ export function opsCardsFromTabs(
     delete notes.completionDates;
   }
   if (todos) cards.todos = todoRows(todos.rows, today, todos.title);
+  let openHouseColumns: Record<string, number> | null = null;
+  if (openHouses) {
+    const scheduled = scheduledOpenHouseRows(openHouses.rows, today, openHouses.title);
+    cards.scheduledOpenHouses = scheduled.items;
+    openHouseColumns = scheduled.columns;
+    if (scheduled.items.length === 0 && sheetDataRowCount(openHouses.rows) > 0) {
+      notes.scheduledOpenHouses = `${openHouses.title} has ${sheetDataRowCount(openHouses.rows)} rows, but none are upcoming open houses.`;
+    }
+  }
   const gbpRows = [
     ...(googleBusiness && !googleBusiness.error ? googleBusinessRows(googleBusiness.rows, googleBusiness.title) : []),
     ...(gbp && !gbp.error && !sheetTabMatches(gbp.title, googleBusiness?.title ?? "")
@@ -966,5 +1100,6 @@ export function opsCardsFromTabs(
     notes,
     sheetEmailDrafts,
     todoColumns: todos ? todoHeaderColumns(todos.rows) : null,
+    openHouseColumns,
   };
 }
