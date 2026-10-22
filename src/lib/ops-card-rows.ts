@@ -425,6 +425,30 @@ function dateHeaderMatch(header: string, kind: "subject" | "completion"): boolea
   return kind === "subject" ? subjectHeader(header) : completionHeader(header);
 }
 
+/**
+ * CTE tabs in the SR workbook put the subject date in column A and leave the header blank.
+ * "Property Address" is the signal that this row is the header, not a deal.
+ */
+function unlabeledSubjectHeader(
+  rows: string[][],
+): { index: number; headers: string[]; dateHeader: string } | null {
+  for (let index = 0; index < Math.min(rows.length, 8); index += 1) {
+    const raw = rows[index] ?? [];
+    if (normHeader(raw[0] ?? "")) continue;
+    const headers = raw.map((cell, column) => normHeader(cell) || (column === 0 ? "subject_removal_date" : ""));
+    if (!headers.some((header) => ADDRESS_HEADERS.includes(header))) continue;
+    const samples = rows
+      .slice(index + 1, index + 9)
+      .map((row) => (row[0] ?? "").trim())
+      .filter(Boolean);
+    const dated = samples.filter((value) => calendarDateFromCell(value, 2026));
+    if (samples.length >= 2 && dated.length >= Math.ceil(samples.length / 2)) {
+      return { index, headers, dateHeader: "subject_removal_date" };
+    }
+  }
+  return null;
+}
+
 function findDealHeader(
   rows: string[][],
   kind: "subject" | "completion",
@@ -436,6 +460,7 @@ function findDealHeader(
     const dateHeader = headers.find((header) => dateHeaderMatch(header, kind));
     if (hasAddress && dateHeader) return { index, headers, dateHeader };
   }
+  if (kind === "subject") return unlabeledSubjectHeader(rows);
   return null;
 }
 

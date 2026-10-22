@@ -9,7 +9,7 @@ import {
   type LiveFeeds,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
-import { calendarToday, currentOpenHouseRows } from "@/lib/dashboard-text";
+import { calendarToday, currentOpenHouseRows, type CalendarDay } from "@/lib/dashboard-text";
 import {
   cincFromTable,
   dateColumnPresent,
@@ -434,10 +434,11 @@ function tabHealth(
   };
 }
 
-function srTabTitle(title: string): boolean {
+function srTabTitle(title: string, today: CalendarDay): boolean {
   if (/notary/i.test(title)) return false;
   if (sheetTabMatches(title, FIRM_TODO_TAB)) return false;
   if (sheetTabMatches(title, SR_CLOSING_TAB)) return true;
+  if (/^cte\b/i.test(title) && new RegExp(`\\b(${today.year}|${today.year + 1})\\b`).test(title)) return true;
   return /sr|subject\s*removal|closing dates/i.test(title);
 }
 
@@ -494,7 +495,7 @@ async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): P
     };
     take(FIRM_TODO_TAB);
     listed.forEach((tab) => {
-      if (srTabTitle(tab.title)) take(tab.title);
+      if (srTabTitle(tab.title, today)) take(tab.title);
     });
     nearbyMonthTabs(today).forEach(take);
     const tabs = wanted.size
@@ -514,11 +515,15 @@ async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): P
       completionSources.map((tab) => dealsFromDateSheet(tab.rows, today, "completion", tab.title)),
     );
     const checkedNames = tabs.map((tab) => tab.title);
-    const subjectNote = subjectSources.length
+    const subjectNote = subject.length
       ? ""
-      : `No subject-removal date column on the transactions sheet${
-          checkedNames.length ? ` (checked ${checkedNames.join(", ")})` : ""
-        }. Notary tabs are excluded. Subject removals are coming from KeyDates only.`;
+      : subjectSources.length
+        ? `${subjectSources.map((tab) => tab.title).join(", ")} ${
+            subjectSources.length === 1 ? "has" : "have"
+          } subject dates, but none are still upcoming. Notary tabs are excluded.`
+        : `No subject-removal date column on the transactions sheet${
+            checkedNames.length ? ` (checked ${checkedNames.join(", ")})` : ""
+          }. Notary tabs are excluded. Subject removals are coming from KeyDates only.`;
     const namedMissing = listed.some((tab) => sheetTabMatches(tab.title, SR_CLOSING_TAB))
       ? []
       : [
@@ -541,6 +546,8 @@ async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): P
           note = sheetTabMatches(tab.title, FIRM_TODO_TAB)
             ? "Checklist only. No subject-removal date column."
             : "No subject-removal date column.";
+        } else if (fromTab === 0) {
+          note = "Subject dates are on this tab, but none are still upcoming.";
         }
         return tabHealth("transactions", tab, tab.title, fromTab + firmCount, note);
       }),
