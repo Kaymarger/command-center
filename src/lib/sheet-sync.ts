@@ -9,7 +9,7 @@ import {
   type LiveFeeds,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
-import { calendarToday, currentOpenHouseRows } from "@/lib/dashboard-text";
+import { calendarToday, currentOpenHouseRows, type CalendarDay } from "@/lib/dashboard-text";
 import {
   cincFromTable,
   dateColumnPresent,
@@ -24,6 +24,7 @@ import {
   GOOGLE_BUSINESS_QUEUE_TAB,
   GOOGLE_BUSINESS_TAB,
   mergeKeyDeals,
+  mergeImportantDateGroups,
   openDealAddressKeys,
   OPS_CARD_TABS,
   opsCardsFromTabs,
@@ -128,6 +129,9 @@ type DashboardStore = {
   todoTabTitle: string;
   openHouseColumns: Record<string, number> | null;
   openHouseTabTitle: string;
+  keyDateColumns: Record<string, number> | null;
+  keyDateHeaderRow: number;
+  keyDateTabTitle: string;
 };
 
 const BACKOFF_START_MS = 60_000;
@@ -147,6 +151,9 @@ function dashboardStore(): DashboardStore {
       todoTabTitle: OPS_CARD_TABS.todos.tab,
       openHouseColumns: null,
       openHouseTabTitle: OPS_CARD_TABS.scheduledOpenHouses.tab,
+      keyDateColumns: null,
+      keyDateHeaderRow: 1,
+      keyDateTabTitle: OPS_CARD_TABS.completionDates.tab,
     };
   }
   return g.__areg_dashboard_cache__;
@@ -360,6 +367,9 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
   todoTabTitle: string;
   openHouseColumns: Record<string, number> | null;
   openHouseTabTitle: string;
+  keyDateColumns: Record<string, number> | null;
+  keyDateHeaderRow: number;
+  keyDateTabTitle: string;
 }> {
   const tables = await opsTables();
   const feeds = feedsFromSheetTables({
@@ -417,6 +427,11 @@ export async function syncFeedsFromGoogleSheet(): Promise<{
     openHouseTabTitle:
       findNamedTab(tables.tabs, OPS_CARD_TABS.scheduledOpenHouses.tab)?.title ||
       OPS_CARD_TABS.scheduledOpenHouses.tab,
+    keyDateColumns: built.keyDateColumns,
+    keyDateHeaderRow: built.keyDateHeaderRow,
+    keyDateTabTitle:
+      findNamedTab(tables.tabs, OPS_CARD_TABS.completionDates.tab)?.title ||
+      OPS_CARD_TABS.completionDates.tab,
   };
 }
 
@@ -476,6 +491,43 @@ export function cachedOpenHouseColumns(): Record<string, number> | null {
 
 export function cachedOpenHouseTabTitle(): string {
   return dashboardStore().openHouseTabTitle || OPS_CARD_TABS.scheduledOpenHouses.tab;
+}
+
+export function cachedKeyDateColumns(): Record<string, number> | null {
+  return dashboardStore().keyDateColumns;
+}
+
+export function cachedKeyDateHeaderRow(): number {
+  return dashboardStore().keyDateHeaderRow || 1;
+}
+
+export function cachedKeyDateTabTitle(): string {
+  return dashboardStore().keyDateTabTitle || OPS_CARD_TABS.completionDates.tab;
+}
+
+export function rememberKeyDateColumn(key: string, column: number) {
+  const box = dashboardStore();
+  box.keyDateColumns = { ...(box.keyDateColumns ?? {}), [key]: column };
+}
+
+export function cachedImportantDates(): { label: string; notes: string[] }[] {
+  return dashboardStore().payload?.feeds.importantDates ?? [];
+}
+
+export function appendCachedImportantDates(additions: { day: CalendarDay; note: string }[]) {
+  const box = dashboardStore();
+  if (!box.payload || !additions.length) return;
+  const today = calendarToday();
+  const importantDates = mergeImportantDateGroups(
+    box.payload.feeds.importantDates ?? [],
+    additions,
+    today,
+  );
+  box.payload = {
+    ...box.payload,
+    feeds: { ...box.payload.feeds, importantDates },
+  };
+  publishDashboardFeeds();
 }
 
 export function dashboardHealth(): DashboardHealth | null {
@@ -771,6 +823,9 @@ async function buildPayload(): Promise<DashboardPayload> {
   let todoTabTitle = OPS_CARD_TABS.todos.tab;
   let openHouseColumns: Record<string, number> | null = null;
   let openHouseTabTitle = OPS_CARD_TABS.scheduledOpenHouses.tab;
+  let keyDateColumns: Record<string, number> | null = null;
+  let keyDateHeaderRow = 1;
+  let keyDateTabTitle = OPS_CARD_TABS.completionDates.tab;
   const today = calendarToday();
   try {
     const synced = await syncFeedsFromGoogleSheet();
@@ -781,6 +836,9 @@ async function buildPayload(): Promise<DashboardPayload> {
     todoTabTitle = synced.todoTabTitle;
     openHouseColumns = synced.openHouseColumns;
     openHouseTabTitle = synced.openHouseTabTitle;
+    keyDateColumns = synced.keyDateColumns;
+    keyDateHeaderRow = synced.keyDateHeaderRow;
+    keyDateTabTitle = synced.keyDateTabTitle;
   } catch (error) {
     if (isQuotaError(error)) throw error;
     opsReadFailed = true;
@@ -868,6 +926,9 @@ async function buildPayload(): Promise<DashboardPayload> {
   dashboardStore().todoTabTitle = todoTabTitle;
   dashboardStore().openHouseColumns = openHouseColumns;
   dashboardStore().openHouseTabTitle = openHouseTabTitle;
+  dashboardStore().keyDateColumns = keyDateColumns;
+  dashboardStore().keyDateHeaderRow = keyDateHeaderRow;
+  dashboardStore().keyDateTabTitle = keyDateTabTitle;
 
   if (!opsReadFailed) await setFeeds(feeds);
 

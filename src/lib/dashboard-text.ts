@@ -185,7 +185,7 @@ export function parseCalendarDates(text: string, fallbackYear: number): Calendar
   }
 
   const named = new RegExp(
-    `\\b(?:(${MONTH_PATTERN})\\.?\\s+(\\d{1,2})(?:\\s*[-–]\\s*(\\d{1,2}))?(?:,?\\s*(\\d{4}))?|(\\d{1,2})(?:\\s*[-–]\\s*(\\d{1,2}))?\\s+(${MONTH_PATTERN})\\.?(?:,?\\s*(\\d{4}))?)`,
+    `\\b(?:(${MONTH_PATTERN})\\.?\\s+(\\d{1,2})(?:\\s*[-–]\\s*(\\d{1,2}))?(?:,?\\s*((?:19|20)\\d{2}))?|(\\d{1,2})(?:\\s*[-–]\\s*(\\d{1,2}))?\\s+(${MONTH_PATTERN})\\.?(?:,?\\s*((?:19|20)\\d{2}))?)`,
     "gi",
   );
   for (const match of source.matchAll(named)) {
@@ -342,7 +342,7 @@ function stripParsedDate(line: string, years: number[]): string {
     .replace(/\b\d{4}-\d{1,2}-\d{1,2}\b/g, " ")
     .replace(
       new RegExp(
-        `\\b(?:(?:${MONTH_PATTERN})\\.?\\s+\\d{1,2}(?:\\s*[-–]\\s*\\d{1,2})?(?:,?\\s*\\d{4})?|\\d{1,2}(?:\\s*[-–]\\s*\\d{1,2})?\\s+(?:${MONTH_PATTERN})\\.?(?:,?\\s*\\d{4})?)`,
+        `\\b(?:(?:${MONTH_PATTERN})\\.?\\s+\\d{1,2}(?:\\s*[-–]\\s*\\d{1,2})?(?:,?\\s*(?:19|20)\\d{2})?|\\d{1,2}(?:\\s*[-–]\\s*\\d{1,2})?\\s+(?:${MONTH_PATTERN})\\.?(?:,?\\s*(?:19|20)\\d{2})?)`,
         "gi",
       ),
       " ",

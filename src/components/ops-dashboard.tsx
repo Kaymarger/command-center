@@ -892,6 +892,23 @@ export function OpsDashboard() {
               storageKey="areg-ops-important-dates"
               kind="dates"
               placeholder="Dump dates however you like — Apr 22 Okada anniversary, 5/4 listing expires…"
+              onSave={async (text) => {
+                try {
+                  const res = await fetch("/api/dashboard/action", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ type: "save-important-dates", text }),
+                  });
+                  const data = (await res.json()) as { ok?: boolean; error?: string; saved?: number };
+                  if (!res.ok || !data.ok) {
+                    return { ok: false, message: data.error || "That did not work." };
+                  }
+                  if (!data.saved) return { ok: true, message: "Those dates are already on KeyDates." };
+                  return { ok: true, message: "" };
+                } catch (err) {
+                  return { ok: false, message: err instanceof Error ? err.message : "That did not work." };
+                }
+              }}
             />
           </div>
         </Tile>

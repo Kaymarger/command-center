@@ -11,15 +11,18 @@ type DashboardNotepadProps = {
   storageKey: string;
   placeholder: string;
   kind: "dates" | "todos";
+  onSave?: (text: string) => Promise<{ ok: boolean; message: string }>;
 };
 
 export function DashboardNotepad({
   storageKey,
   placeholder,
   kind,
+  onSave,
 }: DashboardNotepadProps) {
   const [value, setValue] = useState("");
   const [ready, setReady] = useState(false);
+  const [notice, setNotice] = useState<{ ok: boolean; message: string } | null>(null);
   const [pending, startTransition] = useTransition();
 
   useEffect(() => {
@@ -35,6 +38,17 @@ export function DashboardNotepad({
 
   function organize() {
     startTransition(async () => {
+      if (onSave) {
+        setNotice(null);
+        const result = await onSave(value);
+        if (result.ok) {
+          setValue("");
+          setNotice(result.message ? result : null);
+        } else {
+          setNotice({ ok: false, message: result.message || "That did not work." });
+        }
+        return;
+      }
       await new Promise((r) => setTimeout(r, 280));
       setValue(organizeNotes(value, kind));
     });
@@ -78,11 +92,22 @@ export function DashboardNotepad({
       ) : null}
       <Textarea
         value={value}
-        onChange={(e) => setValue(e.target.value)}
-        onBlur={() => setValue(organizeNotes(value, kind))}
+        onChange={(e) => {
+          setNotice(null);
+          setValue(e.target.value);
+        }}
+        onBlur={() => {
+          if (onSave) return;
+          setValue(organizeNotes(value, kind));
+        }}
         placeholder={placeholder}
         className="h-10 shrink-0 resize-none border-white/10 bg-black/20 text-xs leading-snug"
       />
+      {notice?.message ? (
+        <p className={`text-[0.65rem] leading-snug ${notice.ok ? "text-[#7395B8]" : "text-amber-200"}`}>
+          {notice.message}
+        </p>
+      ) : null}
       <Button
         type="button"
         variant="secondary"
@@ -94,7 +119,7 @@ export function DashboardNotepad({
         {pending ? (
           <>
             <Loader2 className="animate-spin" />
-            Organizing
+            {onSave ? "Saving" : "Organizing"}
           </>
         ) : (
           <>

@@ -15,8 +15,10 @@ import {
   formatLongDate,
   formatMonthDay,
   formatWeekday,
+  importantDateGroups,
   nextAnnualDate,
   subtractMonths,
+  upcomingNoteDate,
   type CalendarDay,
 } from "@/lib/dashboard-text";
 import type { SheetTab } from "@/lib/google-sheets";
@@ -34,12 +36,12 @@ export const OPS_CARD_TABS: Record<
   clientAnniversaries: {
     tab: "Anniversaries",
     columns: ["name", "date", "note"],
-    upcoming: 10,
+    upcoming: 30,
   },
   clientBirthdays: {
     tab: "Birthdays",
     columns: ["name", "date", "note"],
-    upcoming: 10,
+    upcoming: 30,
   },
   referralExchange: {
     tab: "ReferralExchangeOnCall",
@@ -60,7 +62,16 @@ export const OPS_CARD_TABS: Record<
   },
   completionDates: {
     tab: "KeyDates",
-    columns: ["address", "side", "agent", "subject_removal_date", "completion_date", "possession_date", "source"],
+    columns: [
+      "address",
+      "side",
+      "agent",
+      "subject_removal_date",
+      "completion_date",
+      "possession_date",
+      "source",
+      "event_date",
+    ],
   },
   todos: {
     tab: "ToDos",
@@ -123,9 +134,6 @@ const SUBJECT_DATE_HEADERS = ["subject_removal_date", "subject_removal", "sr_dat
 const COMPLETION_DATE_HEADERS = ["completion_date", "completion", "closing_date", "closing"];
 
 const FIRM_CHECKS: { column: string; sentence: (who: string) => string }[] = [
-  { column: "firm_email", sentence: (who) => `Send the firm email for ${who}.` },
-  { column: "compl_email", sentence: (who) => `Send the completion email for ${who}.` },
-  { column: "review_email", sentence: (who) => `Send the review email for ${who}.` },
   { column: "website", sentence: (who) => `Add ${who} to the website.` },
   { column: "mailchimp", sentence: (who) => `Add ${who} to Mailchimp.` },
   { column: "ixact", sentence: (who) => `Add ${who} to IXACT.` },
@@ -238,10 +246,11 @@ function annualHeaderIndex(rows: string[][]): number {
 function annualRows(
   rows: string[][],
   today: CalendarDay,
-  limit: number,
+  withinDays: number,
   prefix: string,
 ): OpsCardItem[] {
   if (!rows.length) return [];
+  const horizon = addCalendarDays(today, withinDays);
   const index = annualHeaderIndex(rows);
   const headers = (rows[index] ?? []).map(normHeader);
   const dated = rows
@@ -262,10 +271,9 @@ function annualRows(
       return { name, note: field(record, "note", "notes", "agent", "address"), upcoming };
     })
     .filter((row): row is { name: string; note: string; upcoming: CalendarDay } =>
-      Boolean(row.name && row.upcoming),
+      Boolean(row.name && row.upcoming && compareCalendarDays(row.upcoming, horizon) <= 0),
     )
-    .sort((a, b) => compareCalendarDays(a.upcoming, b.upcoming))
-    .slice(0, limit);
+    .sort((a, b) => compareCalendarDays(a.upcoming, b.upcoming));
   return dated.map((row, index) =>
     item(
       `${prefix}-${index}`,
@@ -373,7 +381,44 @@ export function humanizeType(value: string): string {
 }
 
 function citesNotaryWatch(record: Record<string, string>): boolean {
-  return Object.values(record).some((value) => /notary_watch/i.test(value));
+  return Object.values(record).some((value) => /notary_watch|\bnotary info\b/i.test(value));
+}
+
+/** Street only. "1025 E 22nd Avenue, Vancouver" stays "1025 E 22nd Avenue". */
+export function addressWithoutCity(address: string): string {
+  return address.split(",")[0]?.trim() || address.trim();
+}
+
+/** First name of each agent. When two are listed and one is Casey, Casey is left off. */
+export function displayAgentNames(value: string): string {
+  const people = value
+    .replace(/\band\b/gi, "&")
+    .split(/\s*(?:&|\/|;|,)\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const firsts: string[] = [];
+  people.forEach((person) => {
+    const first = person.split(/\s+/)[0] ?? "";
+    if (!first) return;
+    if (firsts.some((existing) => existing.toLowerCase() === first.toLowerCase())) return;
+    firsts.push(first);
+  });
+  if (firsts.length > 1) {
+    const rest = firsts.filter((name) => name.toLowerCase() !== "casey");
+    if (rest.length) return rest.join(" & ");
+  }
+  return firsts.join(" & ");
+}
+
+function combinedAgents(record: Record<string, string>): string {
+  const parts: string[] = [];
+  ["agent", "agent_1", "agent_2", "agents"].forEach((key) => {
+    const value = (record[key] ?? "").trim();
+    if (!value) return;
+    if (parts.some((existing) => existing.toLowerCase() === value.toLowerCase())) return;
+    parts.push(value);
+  });
+  return parts.join(" & ");
 }
 
 function isForestHillsTest(record: Record<string, string>, rawRow: string[]): boolean {
@@ -511,7 +556,7 @@ export function dealsFromDateSheet(
     .map((record) => ({
       address: field(record, ...ADDRESS_HEADERS),
       side: field(record, "side", "listing_or_buyer", "listing_buyer"),
-      agent: field(record, "agent", "agent_1"),
+      agent: combinedAgents(record),
       source: field(record, "source") || sourceLabel,
       date: calendarDateFromCell(record[dateHeader] ?? "", today.year),
       possession: calendarDateFromCell(field(record, "possession_date", "possession"), today.year),
@@ -612,6 +657,7 @@ const KEY_DATE_KINDS: { aliases: string[]; label: string }[] = [
   { aliases: ["subject_removal_date", "subject_removal", "sr_date", "sr"], label: "Subject removal" },
   { aliases: ["completion_date", "completion", "closing_date", "closing"], label: "Completion" },
   { aliases: ["possession_date", "possession"], label: "Possession" },
+  { aliases: ["event_date", "event", "important_date"], label: "" },
 ];
 
 function keyDateTable(rows: string[][]): { headerAt: number; headers: string[] } | null {
@@ -710,18 +756,139 @@ export function importantDatesFromKeySheet(
   return groups;
 }
 
+/** Add notepad rows onto the KeyDates list, soonest day first, without repeating a line. */
+export function mergeImportantDateGroups(
+  current: { label: string; notes: string[] }[],
+  additions: { day: CalendarDay; note: string }[],
+  today: CalendarDay,
+): { label: string; notes: string[] }[] {
+  const dated: { day: CalendarDay; note: string }[] = [];
+  current.forEach((group) => {
+    const day = calendarDateFromCell(group.label, today.year);
+    if (!day) return;
+    group.notes.forEach((note) => dated.push({ day, note }));
+  });
+  additions.forEach((entry) => {
+    if (dated.some((existing) => existing.note === entry.note && compareCalendarDays(existing.day, entry.day) === 0)) {
+      return;
+    }
+    dated.push(entry);
+  });
+  dated.sort((a, b) => compareCalendarDays(a.day, b.day) || a.note.localeCompare(b.note));
+  const groups: { label: string; notes: string[] }[] = [];
+  dated.forEach((entry) => {
+    const label = formatLongDate(entry.day);
+    const last = groups[groups.length - 1];
+    if (last?.label === label) last.notes.push(entry.note);
+    else groups.push({ label, notes: [entry.note] });
+  });
+  return groups;
+}
+
 export function dealItems(deals: KeyDeal[], kind: "subject" | "completion"): OpsCardItem[] {
   return [...deals]
     .sort((a, b) => compareCalendarDays(a.date, b.date) || a.address.localeCompare(b.address))
     .map((deal) => {
-      const parts = [deal.address, deal.side, deal.agent, formatLongDate(deal.date), deal.source].filter(Boolean);
-      const text = parts.join(" · ");
+      const place = kind === "completion" ? addressWithoutCity(deal.address) : deal.address;
+      const agent = kind === "completion" ? displayAgentNames(deal.agent) : deal.agent;
+      const parts = [place, deal.side, agent, formatLongDate(deal.date)];
+      if (kind !== "completion" && deal.source) parts.push(deal.source);
+      const text = parts.filter(Boolean).join(" · ");
       const detail =
         kind === "completion" && deal.possession
           ? `${text} · possession ${formatLongDate(deal.possession)}`
           : text;
       return item(`${kind}-${addressKey(deal.address)}`, text, { detail });
     });
+}
+
+export type KeyDateWrite = {
+  address: string;
+  side: string;
+  agent: string;
+  subject_removal_date: string;
+  completion_date: string;
+  possession_date: string;
+  event_date: string;
+  source: string;
+  day: CalendarDay;
+  note: string;
+};
+
+function isoDate(day: CalendarDay): string {
+  const month = String(day.month).padStart(2, "0");
+  const date = String(day.day).padStart(2, "0");
+  return `${day.year}-${month}-${date}`;
+}
+
+function dumpedDateKind(line: string): "subject" | "completion" | "possession" | "event" {
+  if (/\bsubject removal\b|\bsubjects?\b|\bsr\b/i.test(line)) return "subject";
+  if (/\b(completion|closing|closes)\b/i.test(line)) return "completion";
+  if (/\bpossession\b/i.test(line)) return "possession";
+  return "event";
+}
+
+function dumpedAddress(about: string, kind: "subject" | "completion" | "possession" | "event"): string {
+  let text = about;
+  if (kind === "subject") {
+    text = text.replace(/\bsubject removals?\b/gi, " ").replace(/\bsubjects?\b/gi, " ").replace(/\bsr\b/gi, " ");
+  } else if (kind === "completion") {
+    text = text.replace(/\b(completions?|closing|closes)\b/gi, " ");
+  } else if (kind === "possession") {
+    text = text.replace(/\bpossessions?\b/gi, " ");
+  }
+  text = text.replace(/\s+/g, " ").replace(/^[\s,.:;–—-]+|[\s,.:;–—-]+$/g, "").trim();
+  return text || "Important date";
+}
+
+/** One KeyDates row per dumped line that has a date. Lines with no date are skipped. */
+export function keyDateWritesFromDump(raw: string, today: CalendarDay = calendarToday()): KeyDateWrite[] {
+  const writes: KeyDateWrite[] = [];
+  raw
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .forEach((line) => {
+      const day = upcomingNoteDate(line, today);
+      if (!day) return;
+      const grouped = importantDateGroups(line, today).find((group) => group.label !== "No date");
+      const about = grouped?.notes[0]?.trim() || "";
+      const kind = dumpedDateKind(line);
+      const address = dumpedAddress(about, kind);
+      const label =
+        kind === "subject" ? "Subject removal" : kind === "completion" ? "Completion" : kind === "possession" ? "Possession" : "";
+      const row: KeyDateWrite = {
+        address,
+        side: "",
+        agent: "",
+        subject_removal_date: "",
+        completion_date: "",
+        possession_date: "",
+        event_date: "",
+        source: "notepad",
+        day,
+        note: [address, label].filter(Boolean).join(" · "),
+      };
+      const iso = isoDate(day);
+      if (kind === "subject") row.subject_removal_date = iso;
+      else if (kind === "completion") row.completion_date = iso;
+      else if (kind === "possession") row.possession_date = iso;
+      else row.event_date = iso;
+      writes.push(row);
+    });
+  return writes;
+}
+
+export function keyDateHeaderColumns(rows: string[][]): { columns: Record<string, number>; headerRow: number } | null {
+  const table = keyDateTable(rows);
+  if (!table) return null;
+  const columns: Record<string, number> = {};
+  table.headers.forEach((key, column) => {
+    if (key && columns[key] == null) columns[key] = column;
+  });
+  if (!Object.keys(columns).length) return null;
+  return { columns, headerRow: table.headerAt + 1 };
 }
 
 export function todoSentenceFromSheet(
@@ -735,6 +902,10 @@ export function todoSentenceFromSheet(
   if (address) sentence += ` for ${address}`;
   if (due) sentence += ` by ${formatWeekday(due)}`;
   return /[.!?]$/.test(sentence) ? sentence : `${sentence}.`;
+}
+
+function isOutstandingEmailTask(task: string): boolean {
+  return /\b(firm email|completion email|review email|pre-?completion email|compl\.?\s*email)\b/i.test(task);
 }
 
 function todoRows(
@@ -753,7 +924,7 @@ function todoRows(
       status: field(record, "status"),
       due: firstCalendarDate(field(record, "due_date"), today.year),
     }))
-    .filter((row) => row.task)
+    .filter((row) => row.task && !isOutstandingEmailTask(row.task))
     .sort((a, b) => {
       if (a.due && b.due) return compareCalendarDays(a.due, b.due);
       if (a.due) return -1;
@@ -1361,6 +1532,8 @@ export function opsCardsFromTabs(
   todoColumns: Record<string, number> | null;
   openHouseColumns: Record<string, number> | null;
   importantDates: { label: string; notes: string[] }[];
+  keyDateColumns: Record<string, number> | null;
+  keyDateHeaderRow: number;
 } {
   const notes: Partial<Record<OpsCardKey, string>> = {};
   const cards = emptyOpsCards();
@@ -1368,10 +1541,28 @@ export function opsCardsFromTabs(
     (Object.keys(cards) as OpsCardKey[]).forEach((key) => {
       notes[key] = options.sheetError ?? "";
     });
-    return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null, importantDates: [] };
+    return {
+      cards,
+      notes,
+      sheetEmailDrafts: [],
+      todoColumns: null,
+      openHouseColumns: null,
+      importantDates: [],
+      keyDateColumns: null,
+      keyDateHeaderRow: 1,
+    };
   }
   if (tabs.length === 0) {
-    return { cards, notes, sheetEmailDrafts: [], todoColumns: null, openHouseColumns: null, importantDates: [] };
+    return {
+      cards,
+      notes,
+      sheetEmailDrafts: [],
+      todoColumns: null,
+      openHouseColumns: null,
+      importantDates: [],
+      keyDateColumns: null,
+      keyDateHeaderRow: 1,
+    };
   }
 
   const today = options?.today ?? calendarToday();
@@ -1391,12 +1582,12 @@ export function opsCardsFromTabs(
   const closedDeals = keyDates ? closedDealAddressKeys(keyDates.rows, today) : null;
 
   if (anniversaries) {
-    cards.clientAnniversaries = annualRows(anniversaries.rows, today, 10, "anniversary");
+    cards.clientAnniversaries = annualRows(anniversaries.rows, today, 30, "anniversary");
     const unparsed = unparsedAnnualNote(anniversaries.title, anniversaries.rows, cards.clientAnniversaries.length);
     if (unparsed) notes.clientAnniversaries = unparsed;
   }
   if (birthdays) {
-    cards.clientBirthdays = annualRows(birthdays.rows, today, 10, "birthday");
+    cards.clientBirthdays = annualRows(birthdays.rows, today, 30, "birthday");
     const unparsed = unparsedAnnualNote(birthdays.title, birthdays.rows, cards.clientBirthdays.length);
     if (unparsed) notes.clientBirthdays = unparsed;
   }
@@ -1468,5 +1659,7 @@ export function opsCardsFromTabs(
     todoColumns: todos ? todoHeaderColumns(todos.rows) : null,
     openHouseColumns,
     importantDates,
+    keyDateColumns: keyDates ? keyDateHeaderColumns(keyDates.rows)?.columns ?? null : null,
+    keyDateHeaderRow: keyDates ? keyDateHeaderColumns(keyDates.rows)?.headerRow ?? 1 : 1,
   };
 }
