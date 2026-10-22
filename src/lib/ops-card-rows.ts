@@ -22,7 +22,9 @@ import {
 import type { SheetTab } from "@/lib/google-sheets";
 
 /**
- * AREG Ops tab names and columns. KeyDates feeds two cards.
+ * AREG Ops tab names and columns.
+ * Subject removals come only from the SubjectRemovals tab.
+ * Completion dates still come from KeyDates.
  * Firm-transaction checklist rows come from TRANSACTIONS_SHEET_ID.
  */
 export const OPS_CARD_TABS: Record<
@@ -53,8 +55,8 @@ export const OPS_CARD_TABS: Record<
     columns: ["created_at", "address", "envelope_type", "signers", "envelope_subject", "status", "requested_by", "bot"],
   },
   subjectRemovals: {
-    tab: "KeyDates",
-    columns: ["address", "side", "agent", "subject_removal_date", "completion_date", "possession_date", "source"],
+    tab: "SubjectRemovals",
+    columns: ["address", "subject_removal_date", "status", "note", "source_email_date", "updated_at"],
   },
   completionDates: {
     tab: "KeyDates",
@@ -425,30 +427,6 @@ function dateHeaderMatch(header: string, kind: "subject" | "completion"): boolea
   return kind === "subject" ? subjectHeader(header) : completionHeader(header);
 }
 
-/**
- * CTE tabs in the SR workbook put the subject date in column A and leave the header blank.
- * "Property Address" is the signal that this row is the header, not a deal.
- */
-function unlabeledSubjectHeader(
-  rows: string[][],
-): { index: number; headers: string[]; dateHeader: string } | null {
-  for (let index = 0; index < Math.min(rows.length, 8); index += 1) {
-    const raw = rows[index] ?? [];
-    if (normHeader(raw[0] ?? "")) continue;
-    const headers = raw.map((cell, column) => normHeader(cell) || (column === 0 ? "subject_removal_date" : ""));
-    if (!headers.some((header) => ADDRESS_HEADERS.includes(header))) continue;
-    const samples = rows
-      .slice(index + 1, index + 9)
-      .map((row) => (row[0] ?? "").trim())
-      .filter(Boolean);
-    const dated = samples.filter((value) => calendarDateFromCell(value, 2026));
-    if (samples.length >= 2 && dated.length >= Math.ceil(samples.length / 2)) {
-      return { index, headers, dateHeader: "subject_removal_date" };
-    }
-  }
-  return null;
-}
-
 function findDealHeader(
   rows: string[][],
   kind: "subject" | "completion",
@@ -460,7 +438,6 @@ function findDealHeader(
     const dateHeader = headers.find((header) => dateHeaderMatch(header, kind));
     if (hasAddress && dateHeader) return { index, headers, dateHeader };
   }
-  if (kind === "subject") return unlabeledSubjectHeader(rows);
   return null;
 }
 
@@ -522,6 +499,63 @@ export function mergeKeyDeals(lists: KeyDeal[][]): KeyDeal[] {
     });
   });
   return [...byAddress.values()];
+}
+
+const EXTENDED_SUBJECT_NOTE = "Extended – check addendum";
+
+/** Upcoming rows from the SubjectRemovals tab. Removed and past dates stay off the card. */
+export function subjectRemovalRows(
+  rows: string[][],
+  today: CalendarDay,
+): { items: OpsCardItem[]; recognized: boolean } {
+  if (!rows.length) return { items: [], recognized: false };
+  const headerAt = rows.slice(0, 8).findIndex((row) => {
+    const headers = row.map(normHeader);
+    return (
+      headers.some((header) => ADDRESS_HEADERS.includes(header)) &&
+      headers.some((header) => header === "subject_removal_date" || header === "subject_removal")
+    );
+  });
+  if (headerAt < 0) return { items: [], recognized: false };
+  const headers = (rows[headerAt] ?? []).map(normHeader);
+  const items = rows
+    .slice(headerAt + 1)
+    .map((row, offset) => {
+      const record: Record<string, string> = {};
+      headers.forEach((key, column) => {
+        if (key) record[key] = (row[column] ?? "").trim();
+      });
+      return { rowNumber: headerAt + 2 + offset, record };
+    })
+    .filter((entry) => Object.values(entry.record).some(Boolean))
+    .map((entry) => ({
+      rowNumber: entry.rowNumber,
+      address: field(entry.record, ...ADDRESS_HEADERS),
+      status: field(entry.record, "status").toLowerCase(),
+      note: field(entry.record, "note", "notes"),
+      sourceEmail: field(entry.record, "source_email_date"),
+      date: calendarDateFromCell(field(entry.record, "subject_removal_date", "subject_removal"), today.year),
+    }))
+    .filter((row): row is typeof row & { date: CalendarDay } =>
+      Boolean(row.address && row.date && row.status !== "removed" && compareCalendarDays(row.date, today) >= 0),
+    )
+    .sort((a, b) => compareCalendarDays(a.date, b.date) || a.address.localeCompare(b.address))
+    .map((row) => {
+      const place = shortAddress(row.address) || row.address;
+      const extended = row.status === "extended";
+      const text = [place, formatLongDate(row.date), extended ? EXTENDED_SUBJECT_NOTE : ""].filter(Boolean).join(" · ");
+      const detail = [
+        row.address,
+        formatLongDate(row.date),
+        extended ? EXTENDED_SUBJECT_NOTE : row.status ? row.status : "",
+        row.note,
+        row.sourceEmail ? `email ${row.sourceEmail}` : "",
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return item(`subject-${row.rowNumber}`, text, { detail });
+    });
+  return { items, recognized: true };
 }
 
 export function dealItems(deals: KeyDeal[], kind: "subject" | "completion"): OpsCardItem[] {
@@ -1069,8 +1103,8 @@ export function opsCardsFromTabs(
   const referrals = loadedTab(tabs, OPS_CARD_TABS.referralExchange.tab, notes, "referralExchange");
   const emails = loadedTab(tabs, OPS_CARD_TABS.outstandingEmails.tab, notes, "outstandingEmails");
   const drafts = loadedTab(tabs, OPS_CARD_TABS.docusignDrafts.tab, notes, "docusignDrafts");
-  const keyDates = loadedTab(tabs, OPS_CARD_TABS.subjectRemovals.tab, notes, "subjectRemovals");
-  if (!keyDates && !notes.completionDates) notes.completionDates = notes.subjectRemovals;
+  const keyDates = loadedTab(tabs, OPS_CARD_TABS.completionDates.tab, notes, "completionDates");
+  const subjectRemovals = loadedTab(tabs, OPS_CARD_TABS.subjectRemovals.tab, notes, "subjectRemovals");
   const todos = loadedTab(tabs, OPS_CARD_TABS.todos.tab, notes, "todos");
   const openHouses = loadedTab(tabs, OPS_CARD_TABS.scheduledOpenHouses.tab, notes, "scheduledOpenHouses");
   const emailDrafts = findNamedTab(tabs, EMAIL_DRAFTS_TAB);
@@ -1091,15 +1125,24 @@ export function opsCardsFromTabs(
   if (emails) cards.outstandingEmails = emailRows(emails.rows, today, emails.title);
   if (drafts) cards.docusignDrafts = draftRows(drafts.rows, today, drafts.title);
   if (keyDates) {
-    cards.subjectRemovals = dealItems(
-      dealsFromDateSheet(keyDates.rows, today, "subject", keyDates.title),
-      "subject",
-    );
     cards.completionDates = dealItems(
       dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title),
       "completion",
     );
-    delete notes.completionDates;
+  }
+  if (subjectRemovals) {
+    const parsed = subjectRemovalRows(subjectRemovals.rows, today);
+    cards.subjectRemovals = parsed.items;
+    if (parsed.items.length === 0) {
+      const dataRows = sheetDataRowCount(subjectRemovals.rows);
+      notes.subjectRemovals = !dataRows
+        ? `No data in ${subjectRemovals.title}.`
+        : parsed.recognized
+          ? `${subjectRemovals.title} has ${dataRows} rows, but none are still upcoming.`
+          : `${subjectRemovals.title} has ${dataRows} rows, but none had an address and a subject_removal_date.`;
+    }
+  } else if (!notes.subjectRemovals) {
+    notes.subjectRemovals = `No data in ${OPS_CARD_TABS.subjectRemovals.tab}.`;
   }
   if (todos) cards.todos = todoRows(todos.rows, today, todos.title);
   let openHouseColumns: Record<string, number> | null = null;

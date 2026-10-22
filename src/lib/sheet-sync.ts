@@ -9,7 +9,7 @@ import {
   type LiveFeeds,
   type SheetCardErrors,
 } from "@/lib/dashboard-data";
-import { calendarToday, currentOpenHouseRows, type CalendarDay } from "@/lib/dashboard-text";
+import { calendarToday, currentOpenHouseRows } from "@/lib/dashboard-text";
 import {
   cincFromTable,
   dateColumnPresent,
@@ -21,13 +21,11 @@ import {
   GBP_TAB,
   GOOGLE_BUSINESS_TAB,
   mergeKeyDeals,
-  nearbyMonthTabs,
   OPS_CARD_TABS,
   opsCardsFromTabs,
   sheetDataRowCount,
   sheetTabMatches,
   sortScheduledOpenHouseItems,
-  SR_CLOSING_TAB,
   transactionChecklistItems,
   type KeyDeal,
 } from "@/lib/ops-card-rows";
@@ -434,57 +432,39 @@ function tabHealth(
   };
 }
 
-function srTabTitle(title: string, today: CalendarDay): boolean {
-  if (/notary/i.test(title)) return false;
-  if (sheetTabMatches(title, FIRM_TODO_TAB)) return false;
-  if (sheetTabMatches(title, SR_CLOSING_TAB)) return true;
-  if (/^cte\b/i.test(title) && new RegExp(`\\b(${today.year}|${today.year + 1})\\b`).test(title)) return true;
-  return /sr|subject\s*removal|closing dates/i.test(title);
-}
-
 type TransactionRead = {
   items: OpsCardItem[];
   error: string | null;
-  subject: KeyDeal[];
   completion: KeyDeal[];
-  subjectNote: string;
   health: TabHealth[];
   unreadTitles: string[];
 };
 
 async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): Promise<TransactionRead> {
-  const empty = (error: string | null, note: string): TransactionRead => ({
+  const empty = (error: string | null): TransactionRead => ({
     items: [],
     error,
-    subject: [],
     completion: [],
-    subjectNote: note,
     health: [
       {
         spreadsheet: "transactions",
-        tab: "Copy of SR & Closing Dates",
+        tab: FIRM_TODO_TAB,
         found: false,
         rowCount: 0,
         dataRowCount: 0,
         parsedCount: 0,
         error,
-        note,
+        note: error ?? "",
       },
     ],
     unreadTitles: [],
   });
   const id = transactionsSheetId();
   if (!id) {
-    return empty(
-      "TRANSACTIONS_SHEET_ID is not set, so firm-transaction checklist items are not on this card.",
-      "TRANSACTIONS_SHEET_ID is not set, so subject removals are coming from KeyDates only.",
-    );
+    return empty("TRANSACTIONS_SHEET_ID is not set, so firm-transaction checklist items are not on this card.");
   }
   if (!loadServiceAccount()) {
-    return empty(
-      "Add GOOGLE_SERVICE_ACCOUNT_JSON to read the firm-transaction checklist.",
-      "No Google service account, so the transactions sheet was not read.",
-    );
+    return empty("Add GOOGLE_SERVICE_ACCOUNT_JSON to read the firm-transaction checklist.");
   }
   try {
     const listed = await listSheetTitles(id);
@@ -494,73 +474,30 @@ async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): P
       if (found) wanted.set(found.title.toLowerCase(), found.title);
     };
     take(FIRM_TODO_TAB);
-    listed.forEach((tab) => {
-      if (srTabTitle(tab.title, today)) take(tab.title);
-    });
-    nearbyMonthTabs(today).forEach(take);
     const tabs = wanted.size
       ? await readNamedTabs(id, [...wanted.values()].map((title) => ({ title })))
       : [];
     const firm = findNamedTab(tabs, FIRM_TODO_TAB);
-    const subjectSources = tabs.filter(
-      (tab) => !/notary/i.test(tab.title) && dateColumnPresent(tab.rows, "subject"),
-    );
     const completionSources = tabs.filter(
       (tab) => !/notary/i.test(tab.title) && dateColumnPresent(tab.rows, "completion"),
-    );
-    const subject = mergeKeyDeals(
-      subjectSources.map((tab) => dealsFromDateSheet(tab.rows, today, "subject", tab.title)),
     );
     const completion = mergeKeyDeals(
       completionSources.map((tab) => dealsFromDateSheet(tab.rows, today, "completion", tab.title)),
     );
-    const checkedNames = tabs.map((tab) => tab.title);
-    const subjectNote = subject.length
-      ? ""
-      : subjectSources.length
-        ? `${subjectSources.map((tab) => tab.title).join(", ")} ${
-            subjectSources.length === 1 ? "has" : "have"
-          } subject dates, but none are still upcoming. Notary tabs are excluded.`
-        : `No subject-removal date column on the transactions sheet${
-            checkedNames.length ? ` (checked ${checkedNames.join(", ")})` : ""
-          }. Notary tabs are excluded. Subject removals are coming from KeyDates only.`;
-    const namedMissing = listed.some((tab) => sheetTabMatches(tab.title, SR_CLOSING_TAB))
-      ? []
-      : [
-          tabHealth("transactions", undefined, SR_CLOSING_TAB, 0, ""),
-        ];
-    if (namedMissing[0]) {
-      namedMissing[0].note =
-        "No tab with this name. That text is the file title, not a tab. Notary tabs are excluded.";
-    }
-    const health = [
-      ...namedMissing,
-      ...tabs.map((tab) => {
-        const fromTab = dealsFromDateSheet(tab.rows, today, "subject", tab.title).length;
-        const firmCount = sheetTabMatches(tab.title, FIRM_TODO_TAB)
-          ? transactionChecklistItems(tab.rows).length
-          : 0;
-        let note = "";
-        if (/notary/i.test(tab.title)) note = "Skipped. Notary rows are not subject removals.";
-        else if (!dateColumnPresent(tab.rows, "subject")) {
-          note = sheetTabMatches(tab.title, FIRM_TODO_TAB)
-            ? "Checklist only. No subject-removal date column."
-            : "No subject-removal date column.";
-        } else if (fromTab === 0) {
-          note = "Subject dates are on this tab, but none are still upcoming.";
-        }
-        return tabHealth("transactions", tab, tab.title, fromTab + firmCount, note);
-      }),
-    ];
+    const health = tabs.map((tab) => {
+      const firmCount = sheetTabMatches(tab.title, FIRM_TODO_TAB)
+        ? transactionChecklistItems(tab.rows).length
+        : 0;
+      const note = sheetTabMatches(tab.title, FIRM_TODO_TAB) ? "Checklist only." : "";
+      return tabHealth("transactions", tab, tab.title, firmCount, note);
+    });
     const unreadTitles = listed
       .map((tab) => tab.title)
       .filter((title) => !wanted.has(title.toLowerCase()));
     return {
       items: firm && !firm.error ? transactionChecklistItems(firm.rows) : [],
       error: firm?.error ?? null,
-      subject,
       completion,
-      subjectNote,
       health,
       unreadTitles,
     };
@@ -568,7 +505,7 @@ async function readTransactionsSheet(today: ReturnType<typeof calendarToday>): P
     if (isQuotaError(error)) throw error;
     const message =
       error instanceof Error ? error.message : "The firm-transaction sheet could not be read.";
-    return empty(message, message);
+    return empty(message);
   }
 }
 
@@ -653,9 +590,8 @@ function parsedForOpsTab(title: string, feeds: LiveFeeds): number {
   if (/referral/i.test(title)) return cards.referralExchange.length;
   if (/outstanding/i.test(title)) return cards.outstandingEmails.length;
   if (/docusign/i.test(title)) return cards.docusignDrafts.length;
-  if (sheetTabMatches(title, OPS_CARD_TABS.subjectRemovals.tab)) {
-    return cards.subjectRemovals.length + cards.completionDates.length;
-  }
+  if (sheetTabMatches(title, OPS_CARD_TABS.subjectRemovals.tab)) return cards.subjectRemovals.length;
+  if (sheetTabMatches(title, OPS_CARD_TABS.completionDates.tab)) return cards.completionDates.length;
   if (sheetTabMatches(title, OPS_CARD_TABS.todos.tab)) return cards.todos.length;
   if (sheetTabMatches(title, OPS_CARD_TABS.scheduledOpenHouses.tab)) {
     return cards.scheduledOpenHouses?.length ?? 0;
@@ -825,14 +761,7 @@ async function buildPayload(): Promise<DashboardPayload> {
   }
 
   const transactions = await readTransactionsSheet(today);
-  const keyDates = findNamedTab(opsTabs, OPS_CARD_TABS.subjectRemovals.tab);
-  const subjectItems = dealItems(
-    mergeKeyDeals([
-      keyDates ? dealsFromDateSheet(keyDates.rows, today, "subject", keyDates.title) : [],
-      transactions.subject,
-    ]),
-    "subject",
-  );
+  const keyDates = findNamedTab(opsTabs, OPS_CARD_TABS.completionDates.tab);
   const completionItems = dealItems(
     mergeKeyDeals([
       keyDates ? dealsFromDateSheet(keyDates.rows, today, "completion", keyDates.title) : [],
@@ -840,10 +769,6 @@ async function buildPayload(): Promise<DashboardPayload> {
     ]),
     "completion",
   );
-  const subjectNote =
-    subjectItems.length === 0
-      ? [feeds.opsCardNotes?.subjectRemovals, transactions.subjectNote].filter(Boolean).join(" ")
-      : feeds.opsCardNotes?.subjectRemovals ?? "";
   const completionNote = feeds.opsCardNotes?.completionDates ?? "";
   const todoNote = [feeds.opsCardNotes?.todos, transactions.error].filter(Boolean).join(" ");
   feeds = {
@@ -851,13 +776,11 @@ async function buildPayload(): Promise<DashboardPayload> {
     opsCards: {
       ...feeds.opsCards,
       todos: [...(feeds.opsCards?.todos ?? []), ...transactions.items],
-      subjectRemovals: subjectItems,
       completionDates: completionItems,
     },
     opsCardNotes: {
       ...feeds.opsCardNotes,
       ...(todoNote ? { todos: todoNote } : {}),
-      ...(subjectNote ? { subjectRemovals: subjectNote } : {}),
       ...(completionNote ? { completionDates: completionNote } : {}),
     },
   };
