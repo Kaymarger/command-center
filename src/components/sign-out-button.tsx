@@ -2,10 +2,17 @@
 
 import { usePathname } from "next/navigation";
 import { logout } from "@/app/login/actions";
+import { isTenantCalculatorPath } from "@/lib/tenant-notice";
 
 export function SignOutButton() {
   const pathname = usePathname();
-  if (pathname === "/login" || pathname.startsWith("/login/")) return null;
+  if (
+    pathname === "/login" ||
+    pathname.startsWith("/login/") ||
+    isTenantCalculatorPath(pathname)
+  ) {
+    return null;
+  }
 
   return (
     <div className="relative z-30 flex justify-end px-5 pt-4">

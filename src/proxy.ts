@@ -7,6 +7,7 @@ import {
   opsPassword,
   safeNextPath,
 } from "@/lib/ops-auth";
+import { isTenantCalculatorPath } from "@/lib/tenant-notice";
 
 function isLogin(pathname: string) {
   return pathname === "/login" || pathname.startsWith("/login/");
@@ -18,6 +19,12 @@ function isBotWebhook(pathname: string) {
 
 export function proxy(request: NextRequest) {
   const { pathname, search } = request.nextUrl;
+
+  // Public notice calculator. Every other page and API stays behind sign-in.
+  if (isTenantCalculatorPath(pathname)) {
+    return NextResponse.next();
+  }
+
   const password = opsPassword();
   const authed = Boolean(
     password &&

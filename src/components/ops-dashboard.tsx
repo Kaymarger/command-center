@@ -14,6 +14,7 @@ import {
 } from "@/lib/dashboard-data";
 import { useLiveFeeds } from "@/hooks/use-live-feeds";
 import { DashboardNotepad } from "@/components/dashboard-notepad";
+import { TenantNoticeCalculator } from "@/components/tenant-notice-calculator";
 import { cn } from "@/lib/utils";
 
 function MiniButton({
@@ -1038,6 +1039,13 @@ export function OpsDashboard() {
               ))}
             </ul>
           )}
+        </Tile>
+
+        <Tile
+          title="Tenant Notice Date Calculator (BC)"
+          className="col-span-full max-h-none p-3 sm:p-4"
+        >
+          <TenantNoticeCalculator variant="card" />
         </Tile>
       </div>
     </div>
